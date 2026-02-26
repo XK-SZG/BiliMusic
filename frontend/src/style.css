@@ -1,0 +1,62 @@
+/* 全局图片抗锯齿与合成层优化 */
+.image-render-high-quality {
+  image-rendering: -webkit-optimize-contrast; /* 针对 Webkit 锐度优化 */
+  image-rendering: auto; /* 恢复为双线性插值 */
+  backface-visibility: hidden; /* 强制开启 GPU 层 */
+  transform: translateZ(0); /* 同上 */
+}
+
+.image-render-high-quality img {
+  transform: translateZ(0);
+  will-change: transform;
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 
+   定义主题色 CSS 变量 (默认值为 Pink-500 系列)
+*/
+:root {
+  --color-primary: 236 72 153; /* pink-500 */
+  --color-primary-50: 253 242 248;
+  --color-primary-100: 252 231 243;
+  --color-primary-200: 251 207 232;
+  --color-primary-300: 249 168 212;
+  --color-primary-400: 244 114 182;
+  --color-primary-500: 236 72 153;
+  --color-primary-600: 219 39 119;
+  --color-primary-700: 190 24 93;
+  --color-primary-800: 157 23 77;
+  --color-primary-900: 131 24 67;
+}
+
+/* 
+   移除全局 transition 限制，将动画主导权还给 Tailwind。
+   全局 * 选择器定义的 transition 会干扰具体的 Transform/Opacity 动画逻辑。
+*/
+
+/* 自定义滚动条样式 */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+
+/* 扫光动画 */
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.animate-shimmer {
+  animation: shimmer 2s infinite;
+}
+
+/* 慢速跳动 */
+@keyframes bounce-slow {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
+}
+
+.animate-bounce-slow {
+  animation: bounce-slow 3s infinite ease-in-out;
+}

@@ -1,0 +1,73 @@
+{
+  "name": "bili-music",
+  "private": true,
+  "version": "1.0.0",
+  "description": "BiliMusic - A Bilibili Music Player",
+  "author": "XK",
+  "main": "main.cjs",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:5173 && electron .\"",
+    "electron:build": "npm run build && electron-builder"
+  },
+  "dependencies": {
+    "@heroicons/vue": "^2.2.0",
+    "axios": "^1.6.7",
+    "dexie": "^4.3.0",
+    "pinia": "^2.1.7",
+    "tree-kill": "^1.2.2",
+    "vue": "^3.4.15",
+    "vue-router": "^4.2.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.3",
+    "autoprefixer": "^10.4.17",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^40.6.0",
+    "electron-builder": "^26.8.1",
+    "postcss": "^8.4.35",
+    "tailwindcss": "^3.4.1",
+    "vite": "^5.1.3",
+    "wait-on": "^9.0.4"
+  },
+  "build": {
+    "appId": "com.bilimusic.app",
+    "productName": "BiliMusic",
+    "asar": true,
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "public/**/*",
+      "main.cjs",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../dist/backend",
+        "to": "backend",
+        "filter": [
+          "backend.exe"
+        ]
+      }
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "BiliMusic",
+      "include": "installer.nsh",
+      "deleteAppDataOnUninstall": true
+    }
+  }
+}
