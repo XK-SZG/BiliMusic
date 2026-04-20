@@ -8,10 +8,13 @@ import uuid
 import logging
 from io import BytesIO
 import base64
+from cachetools import TTLCache, cached
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# 全局缓存实例，配置 5 分钟 (300 秒) 的过期时间，最多 1000 个条目
+bili_api_cache = TTLCache(maxsize=1000, ttl=300)
 
 class BiliManager:
 
@@ -102,6 +105,60 @@ class BiliManager:
                 return False
         return False
 
+    def _get_self_info_fast(self):
+        """快速验证登录状态并获取用户信息（优化版本，用于登录后的快速响应）"""
+        try:
+            # 确保有基础 Cookie
+            if not self.session.cookies.get('buvid3'):
+                self.session.cookies.set('buvid3', str(uuid.uuid4()).upper() + "infoc", domain=".bilibili.com")
+
+            logging.info("正在快速验证登录状态...")
+            
+            # 增加 Header 模拟浏览器
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": "https://www.bilibili.com/",
+                "Origin": "https://www.bilibili.com"
+            }
+            
+            # 减少超时时间以加快响应
+            resp = self.session.get("https://api.bilibili.com/x/web-interface/nav", headers=headers, timeout=3)
+            res = resp.json()
+            
+            if res.get('code') == 0:
+                data = res.get('data', {})
+                self.is_bili_offline = False
+                if data.get('mid'):
+                    self.mid = data.get('mid')
+                    self.uname = data.get('uname')
+                    self.face = data.get('face')
+                    
+                    # 处理会员信息
+                    vip = data.get('vip', {})
+                    self.vip_status = vip.get('status', 0)
+                    self.vip_type = vip.get('type', 0)
+                    
+                    if self.vip_status == 1:
+                        self.vip_icon_b64 = self.ICON_ANNUAL_VIP
+                    else:
+                        self.vip_icon_b64 = ""
+                    
+                    # 提取 CSRF
+                    self.csrf = self.session.cookies.get('bili_jct', domain=".bilibili.com") or self.session.cookies.get('bili_jct')
+                    
+                    logging.info(f"登录验证成功: {self.uname} (UID: {self.mid})")
+                    self.save_user_info_cache()
+                    return True
+                else:
+                    logging.warning(f"B 站返回未登录状态")
+                    return False
+            else:
+                logging.error(f"验证接口返回错误: {res}")
+                return False
+        except Exception as e:
+            logging.error(f"快速验证异常: {e}")
+            return False
+
     def _get_self_info(self):
         """验证登录状态并获取用户信息"""
         try:
@@ -171,9 +228,20 @@ class BiliManager:
                 return True
             return None
 
+    def clear_cache(self):
+        """清除 API 缓存"""
+        try:
+            bili_api_cache.clear()
+            logging.info("已清除 B 站 API 缓存")
+        except Exception as e:
+            logging.error(f"清除 API 缓存失败: {e}")
+
     def logout(self):
         """退出登录：清除 Session、Cookie 文件和离线缓存"""
         self.session.cookies.clear()
+        
+        # 清除 API 缓存
+        self.clear_cache()
         self.mid = None
         self.uname = None
         self.face = None
@@ -226,7 +294,7 @@ class BiliManager:
         """轮询扫码状态并保存 Cookie"""
         try:
             url = f"https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key={qr_key}"
-            resp = self.session.get(url, timeout=10)
+            resp = self.session.get(url, timeout=5)
             poll = resp.json()
             
             if poll.get('code') != 0:
@@ -247,9 +315,17 @@ class BiliManager:
                 with open(self.cookie_file, "w", encoding='utf-8') as f:
                     json.dump(cookie_dict, f)
                 
-                # 重新加载并验证
+                # 重新加载 Cookie
                 self.load_cookies_from_file()
-                success = self._get_self_info()
+                
+                # 清除旧的 API 缓存
+                self.clear_cache()
+                
+                # 快速验证登录状态（减少超时时间）
+                success = self._get_self_info_fast()
+                
+                # 异步获取头像（不阻塞响应）
+                # 头像会在后续请求中自动加载
                 
                 return {
                     "code": 0,
@@ -258,7 +334,7 @@ class BiliManager:
                         "is_logged_in": success,
                         "mid": self.mid,
                         "uname": self.uname,
-                        "face": self.get_avatar_image() if success else None,
+                        "face": self.face,  # 返回 URL 而不是 Base64
                         "vip_label": self.vip_icon_b64 if success else ""
                     }
                 }
@@ -268,6 +344,7 @@ class BiliManager:
             logging.error(f"检查登录状态异常: {e}")
             return {"code": -1, "message": "服务器内部错误"}
 
+    @cached(cache=bili_api_cache)
     def get_fav_folders(self):
         """获取所有收藏夹列表"""
         if not self.mid and not self._get_self_info(): return []
@@ -292,6 +369,7 @@ class BiliManager:
             logging.error(f"获取收藏夹列表出错: {e}")
             return []
 
+    @cached(cache=bili_api_cache)
     def get_folder_videos(self, media_id, page=1, page_size=20):
         """获取收藏夹视频列表"""
         url = f"https://api.bilibili.com/x/v3/fav/resource/list?media_id={media_id}&pn={page}&ps={page_size}"
@@ -304,6 +382,7 @@ class BiliManager:
             logging.error(f"获取详情发生异常: {e}")
             return None
 
+    @cached(cache=bili_api_cache)
     def get_video_parts(self, bvid):
         """获取视频分集信息"""
         try:
@@ -311,10 +390,10 @@ class BiliManager:
             res = self.session.get(url).json()
             if res['code'] == 0:
                 # 显式包含 cid
-                return res['data']['pages'], res['data']['title'], res['data']['pic'], res['data']['owner']['name']
+                return res['data']['pages'], res['data']['title'], res['data']['pic'], res['data']['owner']['name'], res['data']['owner']['face']
         except Exception as e:
             logging.error(f"获取分集信息失败 {bvid}: {e}")
-        return [], "", "", ""
+        return [], "", "", "", ""
     
     def get_avatar_image(self):
         """获取用户头像并转为 Base64"""
@@ -365,11 +444,15 @@ class BiliManager:
 
     def stream_video_content(self, url, range_header=None):
         """
-        生成器：流式代理传输视频数据
+        [性能优化] 生成器：流式代理传输视频数据，增强异常处理和资源清理
+        并且通过 httpx 实现完全的异步与 TCP 强制释放，杜绝 CLOSE_WAIT
         :param url: B站视频直链
         :param range_header: 前端传来的 Range 头 (用于进度条拖拽)
-        :return: (生成器对象, 响应头)
+        :return: (生成器对象, 响应头, 状态码)
         """
+        import asyncio
+        import httpx
+        
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer": "https://www.bilibili.com/",
@@ -377,36 +460,69 @@ class BiliManager:
             "Range": range_header if range_header else "bytes=0-"
         }
 
+        # [性能优化] 使用 httpx 的流式请求来避免 requests 在 ASGI 里的同步阻塞
+        # 为了兼容当前的同步方法定义，使用 asyncio 包装器进行过渡
+        # 我们会在 generate 里面实际开启连接，从而可以安全地把流交给 FastAPI
+        
         try:
-            # stream=True 是关键，表示不一次性下载，而是建立管道
-            req = self.session.get(url, headers=headers, stream=True, timeout=20)
+            # [修复] 获取请求头前先刷新 session，防止睡眠后连接失效
+            # 减少超时时间，快速失败并重试
+            try:
+                head_req = self.session.get(url, headers=headers, stream=True, timeout=5)
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                logging.warning(f"[流媒体代理] 初始连接失败，尝试重建 session: {e}")
+                # 重建 session 连接
+                self.session.close()
+                self.session = requests.Session()
+                self.session.headers.update({
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Referer": "https://www.bilibili.com/",
+                    "Origin": "https://www.bilibili.com"
+                })
+                # 重新加载 cookies
+                self.load_cookies_from_file()
+                # 重试连接
+                head_req = self.session.get(url, headers=headers, stream=True, timeout=5)
             
             # 提取需要的响应头返回给前端 (如 Content-Type, Content-Length, Content-Range)
             resp_headers = {
-                'Content-Type': req.headers.get('Content-Type', 'video/mp4'),
-                'Content-Length': req.headers.get('Content-Length'),
+                'Content-Type': head_req.headers.get('Content-Type', 'video/mp4'),
+                'Content-Length': head_req.headers.get('Content-Length'),
                 'Accept-Ranges': 'bytes',
             }
             
-            if 'Content-Range' in req.headers:
-                resp_headers['Content-Range'] = req.headers['Content-Range']
+            if 'Content-Range' in head_req.headers:
+                resp_headers['Content-Range'] = head_req.headers['Content-Range']
                 status_code = 206 # Partial Content
             else:
                 status_code = 200
+                
+            # 我们仅仅需要 headers，立刻关闭同步连接避免阻塞
+            head_req.close()
 
-            def generate():
-                try:
-                    # 每次读取 4KB 数据块
-                    for chunk in req.iter_content(chunk_size=1024 * 4):
-                        if chunk:
-                            yield chunk
-                except Exception as e:
-                    logging.error(f"流传输中断: {e}")
-                finally:
-                    req.close()
+            # 提供给 StreamingResponse 的异步生成器
+            async def async_generate():
+                """
+                [性能优化] 完全异步化的生成器，使用 httpx AsyncClient
+                能够完美响应 FastAPI 的协程调度与客户端中止事件
+                """
+                # 使用独立的隔离客户端避免连接池污染
+                async with httpx.AsyncClient(verify=False) as client:
+                    try:
+                        async with client.stream("GET", url, headers=headers, timeout=30.0) as response:
+                            # [性能优化] chunk size 1MB (平衡内存驻留和 CPU 切换)
+                            async for chunk in response.aiter_bytes(chunk_size=1024 * 1024):
+                                if chunk:
+                                    yield chunk
+                    except asyncio.CancelledError:
+                        logging.info("[流媒体代理] 客户端主动断开连接，TCP 极速释放完成")
+                        raise
+                    except Exception as e:
+                        logging.error(f"[流媒体代理] 异步流传输异常: {e}")
+                        raise
 
-            return generate(), resp_headers, status_code
+            return async_generate(), resp_headers, status_code
 
         except Exception as e:
-            logging.error(f"建立视频流失败: {e}")
+            logging.error(f"[流媒体代理] 建立视频流失败: {e}")
             return None, None, 500

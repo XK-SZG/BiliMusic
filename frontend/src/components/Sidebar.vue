@@ -11,6 +11,7 @@ import {
   CloudIcon,
   FolderIcon,
   QueueListIcon,
+  ChartBarIcon,
   Cog6ToothIcon,
   MoonIcon,
   SunIcon
@@ -84,28 +85,32 @@ function goHome() {
 
     <nav class="flex-1 px-2 lg:px-4 space-y-2 mt-2 mb-2 flex flex-col items-center lg:items-stretch">
       <router-link to="/" class="nav-item group/nav" title="概览与登录">
-        <HomeIcon class="w-6 h-6 lg:w-5 lg:h-5 lg:mr-3 text-gray-200 group-hover/nav:text-primary-500 transition-colors" />
+        <HomeIcon class="w-6 h-6 lg:w-5 lg:h-5 lg:mr-3 text-gray-500 dark:text-gray-200 group-hover/nav:text-primary-500 transition-colors" />
         <span class="hidden lg:inline">概览与登录</span>
       </router-link>
       <router-link to="/bili" class="nav-item group/nav" title="B站收藏夹">
-        <CloudIcon class="w-6 h-6 lg:w-5 lg:h-5 lg:mr-3 text-gray-200 group-hover/nav:text-primary-500 transition-colors" />
+        <CloudIcon class="w-6 h-6 lg:w-5 lg:h-5 lg:mr-3 text-gray-500 dark:text-gray-200 group-hover/nav:text-primary-500 transition-colors" />
         <span class="hidden lg:inline">B站收藏夹</span>
       </router-link>
       <router-link to="/local" class="nav-item group/nav" title="本地媒体库">
-        <FolderIcon class="w-6 h-6 lg:w-5 lg:h-5 lg:mr-3 text-gray-200 group-hover/nav:text-primary-500 transition-colors" />
+        <FolderIcon class="w-6 h-6 lg:w-5 lg:h-5 lg:mr-3 text-gray-500 dark:text-gray-200 group-hover/nav:text-primary-500 transition-colors" />
         <span class="hidden lg:inline">本地媒体库</span>
       </router-link>
       <router-link to="/queue" class="nav-item group/nav relative" title="播放队列">
-        <QueueListIcon class="w-6 h-6 lg:w-5 lg:h-5 lg:mr-3 text-gray-200 group-hover/nav:text-primary-500 transition-colors" />
+        <QueueListIcon class="w-6 h-6 lg:w-5 lg:h-5 lg:mr-3 text-gray-500 dark:text-gray-200 group-hover/nav:text-primary-500 transition-colors" />
         <span class="hidden lg:inline">播放队列</span>
-        <span v-if="store.playQueue.length" 
+        <span v-if="store.playQueue.length"
               class="absolute top-1 right-1 lg:static lg:ml-auto text-[10px] font-black text-white bg-red-500 shadow-lg shadow-red-500/20 text-center transition-all duration-300"
               :class="store.playQueue.length < 10 ? 'w-5 h-5 flex items-center justify-center rounded-full' : 'px-2 py-0.5 rounded-full min-w-[1.2em]'">
           {{ store.playQueue.length }}
         </span>
       </router-link>
+      <router-link to="/statistics" class="nav-item group/nav" title="数据统计">
+        <ChartBarIcon class="w-6 h-6 lg:w-5 lg:h-5 lg:mr-3 text-gray-500 dark:text-gray-200 group-hover/nav:text-primary-500 transition-colors" />
+        <span class="hidden lg:inline">数据统计</span>
+      </router-link>
       <router-link to="/settings" class="nav-item group/nav" title="系统设置">
-        <Cog6ToothIcon class="w-6 h-6 lg:w-5 lg:h-5 lg:mr-3 text-gray-200 group-hover/nav:text-primary-500 transition-colors" />
+        <Cog6ToothIcon class="w-6 h-6 lg:w-5 lg:h-5 lg:mr-3 text-gray-500 dark:text-gray-200 group-hover/nav:text-primary-500 transition-colors" />
         <span class="hidden lg:inline">系统设置</span>
       </router-link>
     </nav>

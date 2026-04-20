@@ -2,20 +2,17 @@ import os
 import re
 import time
 import logging
-import yaml
 from .clipboard_service import get_thread_safe_db_session
 from ..database.models import Video
-from ..core.paths import BASE_DIR
+from ..core.paths import BASE_DIR, DATA_DIR
+from ..core.config import get_config
 
-# 获取项目根目录下的 config.yaml
-config_path = os.path.join(BASE_DIR, "config.yaml")
+# 使用统一的配置管理
+config = get_config()
+storage_config = config.get_storage_config()
+scheduler_config = config.get_scheduler_config()
 
-with open(config_path, 'r', encoding='utf-8') as f: # 添加 encoding='utf-8'
-    config = yaml.safe_load(f)
-
-from ..core.paths import DATA_DIR
-
-DOWNLOAD_PATH = config['storage']['download_path']
+DOWNLOAD_PATH = storage_config.get('download_path', 'backend/data/downloads')
 if not os.path.isabs(DOWNLOAD_PATH):
     if DOWNLOAD_PATH.startswith("backend/data/"):
         DOWNLOAD_PATH = os.path.join(DATA_DIR, DOWNLOAD_PATH.replace("backend/data/", ""))
@@ -23,8 +20,12 @@ if not os.path.isabs(DOWNLOAD_PATH):
         DOWNLOAD_PATH = os.path.join(BASE_DIR, DOWNLOAD_PATH)
 os.makedirs(DOWNLOAD_PATH, exist_ok=True)
 
-CACHE_LIMIT_BYTES = config['storage']['cache_limit_gb'] * 1024 * 1024 * 1024
-CLEANUP_INTERVAL_SECONDS = config['scheduler']['cleanup_interval_hours'] * 3600
+CACHE_LIMIT_BYTES = storage_config.get('cache_limit_gb', 10) * 1024 * 1024 * 1024
+CLEANUP_INTERVAL_SECONDS = scheduler_config.get('cleanup_interval_hours', 6) * 3600
+
+logging.info(f"[清理服务] 下载目录: {DOWNLOAD_PATH}")
+logging.info(f"[清理服务] 缓存上限: {storage_config.get('cache_limit_gb', 10)} GB")
+logging.info(f"[清理服务] 清理间隔: {scheduler_config.get('cleanup_interval_hours', 6)} 小时")
 
 
 def run_cleanup_scheduler():
@@ -45,8 +46,9 @@ def _clean_orphan_files():
         all_videos_in_db = {v.bvid for v in db.query(Video.bvid).all()}
 
         for filename in os.listdir(DOWNLOAD_PATH):
-            # 从文件名 'Title - BVxxxx.mp4' 中提取 BV 号
-            bvid_match = re.search(r'(BV[a-zA-Z0-9]{10})', filename)
+            # 从文件名中提取 BV 号（支持多集视频的 _pX 后缀）
+            # 匹配 BVxxxx.mp4 或 BVxxxx_pX.mp4
+            bvid_match = re.search(r'(BV[a-zA-Z0-9]{10}(?:_p\d+)?)', filename)
             if bvid_match:
                 bvid = bvid_match.group(1)
                 if bvid not in all_videos_in_db:

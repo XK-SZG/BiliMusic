@@ -4,6 +4,7 @@ export default {
   getVideos: () => request.get('/local/videos'),
   getCollections: () => request.get('/local/collections'),
   createCollection: (title) => request.post('/local/collections', null, { params: { title } }),
+  renameCollection: (colId, title) => request.put(`/local/collections/${colId}`, { title }),
   deleteCollection: (colId) => request.delete(`/local/collections/${colId}`),
   reorderCollections: (ids) => request.post('/local/collections/reorder', ids),
   reorderVideos: (bvids) => request.post('/local/videos/reorder', bvids),

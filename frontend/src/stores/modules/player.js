@@ -1,19 +1,22 @@
 import { defineStore } from 'pinia'
+import { debounce } from 'lodash-es'
 import { useSettingsStore } from './settings'
 import { useThemeStore } from './theme'
 import { db } from '../../utils/db'
+import { WeightedPlayEngine } from '../../utils/weightedPlayEngine'
 import authApi from '../../api/auth'
 import biliApi from '../../api/bili'
 import localApi from '../../api/local'
 import systemApi from '../../api/system'
+import statsApi from '../../api/stats'
 
 const isDev = window.location.port === '5173' || window.location.port === '3000'
 const isElectron = window.location.protocol === 'file:'
-const API_BASE = import.meta.env.VITE_API_URL || (isDev || isElectron ? 'http://127.0.0.1:12243/api' : `${window.location.origin}/api`)
+const API_BASE = import.meta.env.VITE_API_URL || (isDev || isElectron ? 'http://127.0.0.1:12280/api' : `${window.location.origin}/api`)
 
 export const usePlayerStore = defineStore('player', {
   state: () => ({
-    user: null,
+    user: JSON.parse(localStorage.getItem('cache_user_info') || 'null'),
     biliFolders: JSON.parse(localStorage.getItem('cache_bili_folders') || '[]'),
     folderCache: {}, // Moved to IndexedDB
     folderPagination: {}, // Moved to IndexedDB
@@ -21,6 +24,8 @@ export const usePlayerStore = defineStore('player', {
     localCollections: [],
     currentVideo: JSON.parse(localStorage.getItem('cache_current_video') || 'null'),
     playQueue: [], // Moved to IndexedDB
+    _queueBvidsCache: new Set(), // [性能优化] O(1) 去重缓存
+    _weightEngine: new WeightedPlayEngine(), // [性能优化] O(log N) 权重播放引擎
     queueIndex: parseInt(localStorage.getItem('cache_queue_index') || '-1'),
     isPlaying: false,
     isBuffering: false,
@@ -47,6 +52,9 @@ export const usePlayerStore = defineStore('player', {
     playMode: localStorage.getItem('player_mode') || 'list',
     weightedMode: 'positive',
     shuffleSnapshot: [],
+    recentPlayHistory: [], // 最近播放的视频索引，用于权重播放去重
+    playHistory: [], // 播放历史记录，用于"上一首"功能
+    playHistoryIndex: -1, // 当前在播放历史中的位置
     lengthControl: JSON.parse(localStorage.getItem('player_length_control') || JSON.stringify({
       enabled: false,
       type: 'count',
@@ -56,7 +64,10 @@ export const usePlayerStore = defineStore('player', {
     autoShutdown: localStorage.getItem('player_auto_shutdown') === 'true',
     userReacted: false,
     _lastTime: null,
-    _lastSeekTime: 0
+    _lastSeekTime: 0,
+    _playStartTime: null,
+    _appStartTime: Date.now(),
+    _lastAppUsageReport: Date.now()
   }),
 
   actions: {
@@ -108,6 +119,8 @@ export const usePlayerStore = defineStore('player', {
 
       if (savedQueue.length > 0) {
         this.playQueue = savedQueue.map(v => this._normalizeVideo(v))
+        // [性能优化] 初始化 bvid 缓存集合
+        this._queueBvidsCache = new Set(this.playQueue.map(v => v.bvid).filter(Boolean))
         if (savedBvid) {
           const idx = savedQueue.findIndex(v => v.bvid === savedBvid)
           if (idx !== -1) {
@@ -132,6 +145,19 @@ export const usePlayerStore = defineStore('player', {
 
       await themeStore.syncThemes()
       this.startStatusPolling()
+      this.startAppUsageTracking()
+    },
+
+    startAppUsageTracking() {
+      // 每5分钟上报一次软件使用时长
+      setInterval(() => {
+        this._reportAppUsage()
+      }, 5 * 60 * 1000)
+      
+      // 页面关闭时上报最后一次
+      window.addEventListener('beforeunload', () => {
+        this._reportAppUsage()
+      })
     },
 
     formatImg(url, size = null) {
@@ -139,23 +165,55 @@ export const usePlayerStore = defineStore('player', {
       if (url.startsWith('/local_covers/') || url.startsWith('/local_stickers/')) {
         return `${API_BASE.replace('/api', '')}${url}`
       }
-      if (url.startsWith('http://127.0.0.1') || url.startsWith(window.location.origin)) return url
       
+      // [修复锯齿] 强制替换图片大小后缀。本地数据库可能缓存了原始高分辨率URL或者不合适的尺寸
       let cleanUrl = url.replace(/^https?:/, '').replace(/^http:/, '')
       let result = cleanUrl.startsWith('//') ? `https:${cleanUrl}` : `https://${cleanUrl}`
-      if (size && result.includes('hdslb.com')) {
-        result = `${result}@${size}`
+      
+      // 检查是否为代理URL，提取真实目标
+      if (result.includes('/proxy/image?url=')) {
+        try {
+          const urlParams = new URL(url).searchParams
+          result = decodeURIComponent(urlParams.get('url') || result)
+        } catch (e) {}
       }
-      if (result.includes('hdslb.com')) {
-        return `${API_BASE}/proxy/image?url=${encodeURIComponent(result)}`
+
+      // 处理 B 站相关的图片源，即使它在 archive.biliimg.com 等其它域下
+      if (result.includes('hdslb.com') || result.includes('biliimg.com')) {
+        // 剥离所有的尺寸后缀，如 @xxx.webp
+        const baseUrl = result.split('@')[0]
+        
+        // 重新应用目标尺寸，如果没有传递 size 则默认使用中等压缩，防止过度加载高分辨率图片
+        // 极重要的修改：对于从 SQLite 取出的纯原始 URL（如高清无后缀图），必须在此强制进行 down-scaling
+        const targetSize = size || '640w_360h_1c_1s.webp'
+        const processedUrl = `${baseUrl}@${targetSize}`
+        
+        return `${API_BASE}/proxy/image?url=${encodeURIComponent(processedUrl)}`
       }
+      
       return result
     },
 
     async checkLogin() {
       try {
         const data = await authApi.getStatus()
-        this.user = data.is_logged_in ? data : null
+        const wasLoggedIn = !!this.user
+        const isNowLoggedIn = data.is_logged_in
+        
+        this.user = isNowLoggedIn ? data : null
+        
+        // 登录状态变化时清除缓存
+        if (!wasLoggedIn && isNowLoggedIn) {
+          console.log('[checkLogin] 检测到新登录，清除收藏夹缓存')
+          localStorage.removeItem('cache_bili_folders')
+          this.biliFolders = []
+        }
+        // 缓存用户信息到 localStorage，下次启动时立即显示
+        if (this.user) {
+          localStorage.setItem('cache_user_info', JSON.stringify(this.user))
+        } else {
+          localStorage.removeItem('cache_user_info')
+        }
         this.isOffline = false
         this.isBiliOffline = data.is_bili_offline || false
       } catch (e) {
@@ -167,24 +225,48 @@ export const usePlayerStore = defineStore('player', {
       }
     },
 
-    async logout() { 
+    async logout() {
       try {
         await authApi.logout()
-        this.user = null 
+        this.user = null
+        localStorage.removeItem('cache_user_info')
         this.showToast("账号已退出", "success")
       } catch (e) {
         console.error("Logout failed", e)
       }
     },
 
-    async fetchBiliFolders() {
+    async fetchBiliFolders(retryCount = 0) {
+      const MAX_RETRIES = 3
       try {
         const data = await biliApi.getFolders()
+        console.log('[fetchBiliFolders] API 响应:', data)
         if (data.code === 0) {
+          if (data.data && data.data.length === 0 && retryCount < MAX_RETRIES) {
+            // 返回空数组，可能是缓存问题，重试
+            console.warn(`[fetchBiliFolders] 收藏夹为空，重试 ${retryCount + 1}/${MAX_RETRIES}`)
+            await new Promise(r => setTimeout(r, 1000)) // 等待 1 秒
+            return this.fetchBiliFolders(retryCount + 1)
+          }
           this.biliFolders = data.data.map(f => ({ ...f, cover: this.formatImg(f.cover || f.pic) }))
           localStorage.setItem('cache_bili_folders', JSON.stringify(this.biliFolders))
+          console.log('[fetchBiliFolders] 成功获取收藏夹:', this.biliFolders.length, '个')
+          if (this.biliFolders.length === 0) {
+            this.showToast('收藏夹列表为空，请确认是否有收藏内容', 'info')
+          }
+        } else {
+          console.warn('[fetchBiliFolders] API 返回非 0 code:', data)
+          this.showToast(`获取收藏夹失败: ${data.message || '未知错误'}`, 'error')
         }
-      } catch (e) { console.error(e) }
+      } catch (e) {
+        console.error('[fetchBiliFolders] 请求失败:', e)
+        if (retryCount < MAX_RETRIES) {
+          console.warn(`[fetchBiliFolders] 请求失败，重试 ${retryCount + 1}/${MAX_RETRIES}`)
+          await new Promise(r => setTimeout(r, 1000))
+          return this.fetchBiliFolders(retryCount + 1)
+        }
+        this.showToast('获取收藏夹失败，请检查网络或登录状态', 'error')
+      }
     },
 
     async fetchFolderVideos(mediaId, isLoadMore = false) {
@@ -356,59 +438,135 @@ export const usePlayerStore = defineStore('player', {
       } catch (e) { this.downloadSession.delete(bvid) }
     },
 
-    startStatusPolling() {
-      if (this.pollInterval) clearInterval(this.pollInterval)
-      this.pollInterval = setInterval(async () => {
-        try {
-          const data = await systemApi.getDownloadStatus(); const tasks = data.tasks || []
-          this.activeDownloadCount = tasks.filter(t => t.status === 'downloading').length
-          this.localVideos.forEach(localV => {
-            const task = tasks.find(t => t.bvid === localV.bvid)
-            if (task) { localV.download_status = task.status; localV.progress = task.progress }
-            else if (['downloading', 'pending'].includes(localV.download_status)) { localV.download_status = 'completed'; localV.progress = 100 }
-          })
-          const sessionBvids = Array.from(this.downloadSession)
-          if (sessionBvids.length > 0) {
-            let totalSum = 0, completed = 0
-            sessionBvids.forEach(bvid => {
-              const task = tasks.find(t => t.bvid === bvid); const localV = this.localVideos.find(v => v.bvid === bvid)
-              if (task) totalSum += (task.progress || 0)
-              else if (localV && localV.download_status === 'completed') { totalSum += 100; completed++ }
-              else { totalSum += 100; completed++ }
-            })
-            this.globalDownloadProgress = totalSum / sessionBvids.length
-            if (completed === sessionBvids.length && this.globalDownloadProgress >= 99.9) {
-              setTimeout(() => { if (this.activeDownloadCount === 0) { this.downloadSession.clear(); this.globalDownloadProgress = 0 } }, 2000)
-            }
-          }
-        } catch (e) {}
-      }, 1000)
+    async cancelDownload(bvid) {
+      try {
+        await systemApi.cancelDownload(bvid)
+        const v = this.localVideos.find(i => i.bvid === bvid)
+        if (v) v.download_status = 'not_downloaded'
+        this.downloadSession.delete(bvid)
+        this.showToast('已取消下载', 'success')
+      } catch (e) {
+        console.error('取消下载失败:', e)
+        this.showToast('取消下载失败', 'error')
+      }
     },
 
+    async cancelAllDownloads() {
+      try {
+        const result = await systemApi.cancelAllDownloads()
+        // 更新所有正在下载的视频状态
+        this.localVideos.forEach(v => {
+          if (v.download_status === 'pending' || v.download_status === 'downloading') {
+            v.download_status = 'not_downloaded'
+            this.downloadSession.delete(v.bvid)
+          }
+        })
+        this.showToast(`已取消 ${result.count} 个下载任务`, 'success')
+      } catch (e) {
+        console.error('批量取消下载失败:', e)
+        this.showToast('批量取消下载失败', 'error')
+      }
+    },
+
+    startStatusPolling() {
+      // 废弃之前的轮询方法，改由 App.vue 统一通过 SSE 处理
+      // 此处仅做空函数保留或可将部分状态计算逻辑移到专门的 update 方法
+    },
+    
+    updateDownloadStateFromSSE(data) {
+      const tasks = data.tasks || []
+      
+      // 记录这次 SSE 中活跃的任务 bvid
+      const activeBvids = new Set(tasks.map(t => t.bvid))
+      let needRefresh = false
+      
+      // [修复] 乐观更新所有可能包含下载状态的集合（本地库、B站收藏夹缓存、播放队列），消除卡片卡在下载中的Bug
+      const updateList = (list) => {
+        if (!list) return
+        list.forEach(v => {
+          const task = tasks.find(t => t.bvid === v.bvid)
+          if (task) {
+            v.download_status = task.status
+            v.progress = task.progress
+          } else if (v.download_status === 'pending' || v.download_status === 'downloading') {
+            v.download_status = 'completed'
+            v.progress = 100
+            needRefresh = true
+          }
+        })
+      }
+
+      updateList(this.localVideos)
+      updateList(this.playQueue)
+      Object.values(this.folderCache).forEach(folder => updateList(folder))
+      if (this.currentVideo) updateList([this.currentVideo])
+      
+      if (needRefresh) {
+        this.fetchLocalVideos()
+      }
+      
+      // [修复] 活跃下载数应为所有未完成任务的总和（含等待中），而不是仅显示正在 downloading 的 3 个
+      this.activeDownloadCount = tasks.length
+      
+      const sessionBvids = Array.from(this.downloadSession)
+      if (sessionBvids.length > 0) {
+        let totalSum = 0, completed = 0
+        sessionBvids.forEach(bvid => {
+          const task = tasks.find(t => t.bvid === bvid); const localV = this.localVideos.find(v => v.bvid === bvid)
+          if (task) totalSum += (task.progress || 0)
+          else if (localV && localV.download_status === 'completed') { totalSum += 100; completed++ }
+          else { totalSum += 100; completed++ }
+        })
+        this.globalDownloadProgress = totalSum / sessionBvids.length
+        if (completed === sessionBvids.length && this.globalDownloadProgress >= 99.9) {
+          setTimeout(() => { if (this.activeDownloadCount === 0) { this.downloadSession.clear(); this.globalDownloadProgress = 0 } }, 2000)
+        }
+      }
+    },
+
+    // [性能优化] 防抖版本的持久化方法
     _saveQueue() {
+      this._debouncedSaveQueue()
+    },
+
+    // [性能优化] 实际的持久化逻辑（防抖 2 秒，最大等待 5 秒）
+    _debouncedSaveQueue: debounce(async function() {
       const seen = new Set()
       this.playQueue = this.playQueue.map(v => this._normalizeVideo(v)).filter(v => {
         if (!v.bvid || seen.has(v.bvid)) return false
         seen.add(v.bvid); return true
       })
-      // 同时写入 IndexedDB，并使用 JSON.parse(JSON.stringify()) 脱水
-      db.playQueue.clear().then(() => {
-         db.playQueue.bulkAdd(JSON.parse(JSON.stringify(this.playQueue || []))).catch(e => console.warn("IndexedDB save queue failed", e))
-      }).catch(e => console.warn("IndexedDB clear failed", e))
-
-      // 备份到 localStorage
-      try {
-        localStorage.setItem('cache_play_queue', JSON.stringify(this.playQueue))
-      } catch (e) {
-        console.warn("localStorage quota exceeded for play_queue, skipped.")
-      }
       
+      // [性能优化] 同步更新 bvid 缓存集合
+      this._queueBvidsCache = new Set(this.playQueue.map(v => v.bvid).filter(Boolean))
+      
+      // [性能优化] 轻量化序列化：仅保存核心字段，避免深拷贝整个响应式对象
+      const serializedQueue = this.playQueue.map(v => ({
+        bvid: v.bvid,
+        title: v.title,
+        owner: typeof v.owner === 'object' ? v.owner?.name : v.owner,
+        duration: v.duration,
+        pic: v.pic,
+        score: v.score,
+        download_status: v.download_status,
+        trim_start: v.trim_start,
+        trim_end: v.trim_end
+      }))
+
+      // 写入 IndexedDB
+      try {
+        await db.playQueue.clear()
+        await db.playQueue.bulkAdd(serializedQueue)
+      } catch (e) {
+        console.warn("[Performance] IndexedDB save queue failed", e)
+      }
+
+      // [性能优化] LocalStorage 仅存储极轻量的索引信息，不再备份完整队列
       localStorage.setItem('cache_queue_index', this.queueIndex.toString())
       if (this.currentVideo) {
         localStorage.setItem('cache_current_video_bvid', this.currentVideo.bvid)
-        localStorage.setItem('cache_current_video', JSON.stringify(this.currentVideo))
       }
-    },
+    }, 2000, { maxWait: 5000 }),
 
     _normalizeVideo(v) {
       return {
@@ -445,33 +603,52 @@ export const usePlayerStore = defineStore('player', {
     async addToQueue(video, autoDownload = false) {
       const normalized = this._normalizeVideo(video)
       const targetId = normalized.bvid; if (!targetId) return
-      const idx = this.playQueue.findIndex(v => (v.bvid || v.bv_id) === targetId)
-      if (idx !== -1) {
-        this.playQueue[idx] = { ...this.playQueue[idx], ...normalized }
+      
+      // [性能优化] 使用 O(1) 缓存集合检查是否存在
+      if (this._queueBvidsCache.has(targetId)) {
+        const idx = this.playQueue.findIndex(v => (v.bvid || v.bv_id) === targetId)
+        if (idx !== -1) {
+          this.playQueue[idx] = { ...this.playQueue[idx], ...normalized }
+        }
         this.showToast("该视频已在队列中", "info")
         return
       }
-      if (autoDownload && normalized.download_status !== 'completed' && normalized.download_status !== 'pending' && normalized.download_status !== 'downloading') { this.addToDownload(normalized.bvid) }
-      this.playQueue.push(normalized); this.showToast(`已加入队列`, "success"); await this._saveQueue()
+      
+      if (autoDownload && normalized.download_status !== 'completed' && normalized.download_status !== 'pending' && normalized.download_status !== 'downloading') {
+        this.addToDownload(normalized.bvid)
+      }
+      this.playQueue.push(normalized)
+      this._queueBvidsCache.add(targetId) // [性能优化] 同步更新缓存
+      this._resetPlayState() // 队列变化，重置播放状态
+      this.showToast(`已加入队列`, "success")
+      await this._saveQueue()
     },
 
     async addToQueueList(list, autoDownload = false) {
-      const existing = new Set(this.playQueue.map(v => v.bvid || v.bv_id)); const newOnes = []
+      // [性能优化] 直接使用缓存集合，避免每次都遍历队列创建 Set
+      const newOnes = []
       list.forEach(v => {
         const normalized = this._normalizeVideo(v)
         const id = normalized.bvid
-        if (id && !existing.has(id)) {
+        if (id && !this._queueBvidsCache.has(id)) {
           newOnes.push(normalized)
+          this._queueBvidsCache.add(id) // [性能优化] 同步更新缓存
           if (autoDownload && normalized.download_status !== 'completed') this.addToDownload(id)
         }
       })
       if (newOnes.length === 0) { this.showToast("选中的视频均已在队列中", "info") ; return }
-      this.playQueue.push(...newOnes); this.showToast(`已添加 ${newOnes.length} 个视频`, "success"); await this._saveQueue()
+      this.playQueue.push(...newOnes)
+      this._resetPlayState() // 队列变化，重置播放状态
+      this.showToast(`已添加 ${newOnes.length} 个视频`, "success")
+      await this._saveQueue()
     },
 
     async removeFromQueue(index) {
       const isCurrent = index === this.queueIndex
+      const removedBvid = this.playQueue[index]?.bvid
       this.playQueue.splice(index, 1)
+      if (removedBvid) this._queueBvidsCache.delete(removedBvid) // [性能优化] 同步更新缓存
+      this._resetPlayState() // 队列变化，重置播放状态
       if (index < this.queueIndex) this.queueIndex--
       else if (isCurrent) this._stopAndReset()
       await this._saveQueue()
@@ -481,6 +658,9 @@ export const usePlayerStore = defineStore('player', {
       const curBvid = this.currentVideo?.bvid
       const isDeletingCurrent = bvids.includes(curBvid)
       this.playQueue = this.playQueue.filter(v => !bvids.includes(v.bvid))
+      // [性能优化] 批量删除缓存
+      bvids.forEach(bvid => this._queueBvidsCache.delete(bvid))
+      this._resetPlayState() // 队列变化，重置播放状态
       if (isDeletingCurrent) this._stopAndReset()
       else if (curBvid) {
         this.queueIndex = this.playQueue.findIndex(v => v.bvid === curBvid)
@@ -495,8 +675,36 @@ export const usePlayerStore = defineStore('player', {
       this.currentTime = 0; this.duration = 0; this.buffered = 0
     },
 
+    _resetPlayState() {
+      // 队列变化时，清空洗牌序列和播放历史
+      this.shuffleSnapshot = []
+      this.recentPlayHistory = []
+      this.playHistory = []
+      this.playHistoryIndex = -1
+      // [性能优化] 重置权重引擎，下次使用时重新构建
+      this._weightEngine.reset()
+    },
+
+    _addToPlayHistory(index) {
+      // 如果当前不在历史末尾，清除后面的历史
+      if (this.playHistoryIndex < this.playHistory.length - 1) {
+        this.playHistory = this.playHistory.slice(0, this.playHistoryIndex + 1)
+      }
+      
+      // 添加新的播放记录
+      this.playHistory.push(index)
+      this.playHistoryIndex = this.playHistory.length - 1
+      
+      // 限制历史长度（最多 100 首）
+      if (this.playHistory.length > 100) {
+        this.playHistory.shift()
+        this.playHistoryIndex--
+      }
+    },
+
     async playFromQueue(index) {
       if (index >= 0 && index < this.playQueue.length) {
+        this._addToPlayHistory(index) // 添加到播放历史
         this.queueIndex = index; this.currentVideo = this.playQueue[index]
         await this._saveQueue(); this._loadAndPlay()
       }
@@ -526,6 +734,7 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async next() {
+      this.userReacted = false // 重置当前播放歌曲的点赞/点踩状态
       if (this.playQueue.length === 0) return
       const hasFilter = this.filteredQueueIndices.length > 0 && this.filteredQueueIndices.length < this.playQueue.length
       if (this.lengthControl.enabled && this.lengthControl.type === 'count' && this.lengthControl.target > 0) {
@@ -534,7 +743,7 @@ export const usePlayerStore = defineStore('player', {
       if (this.playMode === 'single_loop') { this._loadAndPlay(); return }
       let nextIdx = -1; const pool = hasFilter ? this.filteredQueueIndices : this.playQueue.map((_, i) => i)
       if (this.playMode.startsWith('shuffle')) {
-        nextIdx = pool[Math.floor(Math.random() * pool.length)]
+        nextIdx = this._getShuffleNextIndex(pool)
       } else if (this.playMode === 'weighted') {
         nextIdx = this._getWeightedNextIndex(hasFilter ? this.filteredQueueIndices : null)
       } else if (this.playMode === 'list_loop') {
@@ -550,12 +759,14 @@ export const usePlayerStore = defineStore('player', {
         }
       }
       if (nextIdx !== -1) {
+        this._addToPlayHistory(nextIdx) // 添加到播放历史
         this.queueIndex = nextIdx; this.currentVideo = this.playQueue[this.queueIndex];
         await this._saveQueue(); this._loadAndPlay()
       }
     },
 
     _advanceIndexOnly() {
+      this.userReacted = false // 重置当前播放歌曲的点赞/点踩状态
       const settingsStore = useSettingsStore()
       const hasFilter = this.filteredQueueIndices.length > 0 && this.filteredQueueIndices.length < this.playQueue.length
       const pool = hasFilter ? this.filteredQueueIndices : this.playQueue.map((_, i) => i)
@@ -568,22 +779,108 @@ export const usePlayerStore = defineStore('player', {
       }
     },
 
+    _getShuffleNextIndex(pool) {
+      // 如果洗牌序列为空或已播完，重新生成
+      if (this.shuffleSnapshot.length === 0) {
+        // Fisher-Yates 洗牌算法
+        const snapshot = [...pool]
+        for (let i = snapshot.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1))
+          ;[snapshot[i], snapshot[j]] = [snapshot[j], snapshot[i]]
+        }
+        this.shuffleSnapshot = snapshot
+      }
+      
+      // 从洗牌序列中取出下一个
+      return this.shuffleSnapshot.shift()
+    },
+
     _getWeightedNextIndex(limitIndices = null) {
+      /**
+       * [性能优化] 使用 O(log N) 权重引擎代替 O(N) 遍历计算
+       */
       const settingsStore = useSettingsStore()
-      let pool = this.playQueue.map((v, i) => ({ v, i }))
-      if (limitIndices) pool = pool.filter(item => limitIndices.includes(item.i))
+      
+      // 确定有效的播放池
+      let effectiveQueue = this.playQueue
+      let effectiveIndices = this.playQueue.map((_, i) => i)
+      
+      if (limitIndices && limitIndices.length > 0) {
+        effectiveQueue = limitIndices.map(i => this.playQueue[i])
+        effectiveIndices = limitIndices
+      }
+      
+      // 边界情况：队列为空
+      if (effectiveQueue.length === 0) return 0
+      
+      // 历史大小：最少 2 首，最多 5 首
+      const historySize = Math.max(2, Math.min(5, Math.floor(effectiveQueue.length * 0.1)))
       const sensitivity = settingsStore.settings.weightSensitivity || 2.0
-      const weights = pool.map(item => { 
-        const s = item.v.score ?? 5.0
-        let baseWeight = this.weightedMode === 'positive' ? s : (11 - s)
-        return Math.pow(baseWeight / 5, sensitivity)
-      })
-      const sum = weights.reduce((a, b) => a + b, 0); let rand = Math.random() * sum
-      for (let i = 0; i < weights.length; i++) { if (rand < weights[i]) return pool[i].i; rand -= weights[i] }
-      return pool[0].i
+      
+      // [性能优化] 检查引擎是否需要重建
+      if (!this._weightEngine.isReady()) {
+        this._weightEngine.build(
+          effectiveQueue,
+          this.recentPlayHistory,
+          this.weightedMode,
+          sensitivity
+        )
+        
+        // 开发模式下输出权重分布
+        if (import.meta.env.DEV) {
+          const distribution = this._weightEngine.getWeightDistribution(effectiveQueue)
+          console.log('[权重播放] 权重分布:', distribution.slice(0, 10)) // 仅显示前 10 个
+        }
+      }
+      
+      // [性能优化] O(log N) 查询下一首
+      const selectedLocalIdx = this._weightEngine.next()
+      
+      if (selectedLocalIdx === -1) {
+        // 引擎失败，回退到随机选择
+        console.warn('[权重播放] 引擎失败，回退到随机选择')
+        const randomIdx = effectiveIndices[Math.floor(Math.random() * effectiveIndices.length)]
+        this._updatePlayHistory(randomIdx, historySize)
+        return randomIdx
+      }
+      
+      // 将局部索引映射回全局索引
+      const selectedIdx = effectiveIndices[selectedLocalIdx]
+      this._updatePlayHistory(selectedIdx, historySize)
+      
+      // 更新历史后，标记引擎需要重建（因为历史变化会影响权重）
+      this._weightEngine.reset()
+      
+      return selectedIdx
+    },
+
+    _updatePlayHistory(index, historySize) {
+      // 更新播放历史
+      this.recentPlayHistory.push(index)
+      if (this.recentPlayHistory.length > historySize) {
+        this.recentPlayHistory.shift()
+      }
     },
 
     async prev() {
+      this.userReacted = false // 重置当前播放歌曲的点赞/点踩状态
+      // 在随机/权重模式下，从播放历史中获取上一首
+      if (this.playMode.startsWith('shuffle') || this.playMode === 'weighted') {
+        if (this.playHistoryIndex > 0) {
+          this.playHistoryIndex--
+          const prevIdx = this.playHistory[this.playHistoryIndex]
+          this.queueIndex = prevIdx
+          this.currentVideo = this.playQueue[this.queueIndex]
+          await this._saveQueue()
+          this._loadAndPlay()
+          return
+        } else {
+          this.showToast("已经是第一首了", "info")
+          return
+        }
+      }
+      
+      // 其他模式：顺序播放
       const hasFilter = this.filteredQueueIndices.length > 0 && this.filteredQueueIndices.length < this.playQueue.length
       let prevIdx = -1; const pool = hasFilter ? this.filteredQueueIndices : this.playQueue.map((_, i) => i)
       if (this.playMode === 'list_loop') { const curPos = pool.indexOf(this.queueIndex); prevIdx = pool[(curPos - 1 + pool.length) % pool.length] }
@@ -604,13 +901,23 @@ export const usePlayerStore = defineStore('player', {
     },
 
     _loadAndPlay(resumeTime = null) {
+      this.userReacted = false // 重置当前播放歌曲的点赞/点踩状态
+      
+      // 记录上一首歌的播放时长
+      if (this._playStartTime && this.currentVideo) {
+        const playDuration = Math.floor((Date.now() - this._playStartTime) / 1000)
+        if (playDuration > 5) { // 只记录播放超过5秒的
+          this._reportPlayRecord(this.currentVideo.bvid, playDuration)
+        }
+      }
+      
       if (!this.currentVideo || !this.audioElement) return
       const settingsStore = useSettingsStore()
       const isOnline = this.currentVideo.download_status !== 'completed'
       
-      let targetSrc = this.currentVideo.is_local 
+      let targetSrc = this.currentVideo.is_local
         ? `${API_BASE}/play/stream/${this.currentVideo.bvid}`
-        : (isOnline 
+        : (isOnline
             ? `${API_BASE}/play/stream/${this.currentVideo.bvid}?quality=${settingsStore.settings.streamQuality}`
             : `${API_BASE.replace('/api', '')}/downloads/${this.currentVideo.bvid}.mp4`)
 
@@ -625,6 +932,7 @@ export const usePlayerStore = defineStore('player', {
         
         this.audioElement.play().then(() => {
           this.isPlaying = true
+          this._playStartTime = Date.now() // 记录播放开始时间
           this.updateMediaSession()
           if (settingsStore.settings.enableVolumeFade) {
             let currentV = 0; const step = targetVolume / 20
@@ -645,6 +953,27 @@ export const usePlayerStore = defineStore('player', {
       this.audioElement.load()
       this.audioElement.src = targetSrc
       this.audioElement.load()
+    },
+
+    async _reportPlayRecord(bvid, duration) {
+      try {
+        await statsApi.recordPlay(bvid, duration)
+      } catch (e) {
+        console.error('上报播放记录失败:', e)
+      }
+    },
+
+    async _reportAppUsage() {
+      const now = Date.now()
+      const duration = Math.floor((now - this._lastAppUsageReport) / 1000)
+      if (duration > 0) {
+        try {
+          await statsApi.recordAppUsage(duration)
+          this._lastAppUsageReport = now
+        } catch (e) {
+          console.error('上报使用时长失败:', e)
+        }
+      }
     },
 
     _switchStreamingQuality() {
@@ -704,12 +1033,41 @@ export const usePlayerStore = defineStore('player', {
       }
     },
     setPlayMode(mode) { this.playMode = mode; localStorage.setItem('player_mode', mode) },
-    updateScoreBatch(delta) {
+    async updateScoreBatch(delta) {
       if (!this.currentVideo || this.userReacted) return;
+      
+      const bvid = this.currentVideo.bvid;
+      const isLocal = this.localVideos.some(v => v.bvid === bvid);
+      
+      if (!isLocal) {
+        // 如果不在本地库，则先导入
+        try {
+          // 这里的 collection_id 'unclassified' 或者其他的合适的值，取决于后端的逻辑
+          // 需要调用 importBiliVideos
+          await localApi.importBiliVideos('unclassified', [{
+            bvid: this.currentVideo.bvid,
+            title: this.currentVideo.title,
+            owner: this.currentVideo.owner,
+            pic: this.formatImg(this.currentVideo.pic),
+            duration: this.currentVideo.duration
+          }]);
+          // 同步获取本地视频列表
+          await this.fetchLocalVideos();
+        } catch (e) {
+          console.error("Failed to import video before scoring:", e);
+          this.showToast("同步视频失败，无法评分", "error");
+          return;
+        }
+      }
+      
       const newScore = Math.max(1, Math.min(10, (this.currentVideo.score || 5.0) + delta));
-      this.updateVideoScore(this.currentVideo.bvid, newScore);
-      this.userReacted = true;
-      this.showToast(`评分已更新: ${newScore.toFixed(1)}`, "success")
+      try {
+        await this.updateVideoScore(this.currentVideo.bvid, newScore);
+        this.userReacted = true;
+        this.showToast(`评分已更新: ${newScore.toFixed(1)}`, "success")
+      } catch (e) {
+        this.showToast(`评分更新失败`, "error")
+      }
     },
     async executeShutdown() {
       try {

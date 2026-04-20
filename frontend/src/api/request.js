@@ -2,7 +2,7 @@ import axios from 'axios'
 
 const isDev = window.location.port === '5173' || window.location.port === '3000'
 const isElectron = window.location.protocol === 'file:'
-const API_BASE = import.meta.env.VITE_API_URL || (isDev || isElectron ? 'http://127.0.0.1:12243/api' : `${window.location.origin}/api`)
+const API_BASE = import.meta.env.VITE_API_URL || (isDev || isElectron ? 'http://127.0.0.1:12280/api' : `${window.location.origin}/api`)
 
 const service = axios.create({
   baseURL: API_BASE,

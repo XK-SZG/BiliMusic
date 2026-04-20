@@ -161,7 +161,7 @@ async function getQr() {
         clearInterval(pollTimer.value)
         pollTimer.value = null
       }
-    }, 3000)
+    }, 1500)
   } catch (err) {
     console.error(err)
   }
@@ -169,8 +169,8 @@ async function getQr() {
 </script>
 
 <template>
-  <div class="max-w-2xl mx-auto mt-10">
-    <div class="p-10 rounded-2xl shadow-xl text-center transition-all duration-300
+  <div class="h-full flex items-center justify-center p-4 lg:p-10">
+    <div class="w-full max-w-2xl p-10 rounded-2xl shadow-xl text-center transition-all duration-300
                 bg-white/50 dark:bg-gray-800/40 backdrop-blur-xl border border-white/20 dark:border-white/5
                 text-gray-800 dark:text-white">
       
@@ -211,9 +211,9 @@ async function getQr() {
           <div class="relative group/avatar p-4"> 
             <div class="absolute inset-0 bg-primary-500 rounded-full blur-3xl opacity-0 group-hover/avatar:opacity-20 transition-opacity duration-700"></div>
             <a :href="`https://space.bilibili.com/${store.user.mid}`" target="_blank" class="block relative z-10">
-              <img v-if="store.user.face" :src="store.user.face" class="w-28 h-28 rounded-full border-4 border-white dark:border-gray-700 shadow-2xl object-cover transition-transform duration-500 group-hover/avatar:scale-105" />
+              <img v-if="store.user.face" :src="store.user.face" @error="(e) => e.target.style.display='none'" draggable="false" class="w-28 h-28 rounded-full border-4 border-white dark:border-gray-700 shadow-2xl object-cover transition-transform duration-500 group-hover/avatar:scale-105" />
               <!-- 直接在前端使用内置图标 -->
-              <img v-if="store.user.vip_status === 1" :src="ICON_ANNUAL_VIP" 
+              <img v-if="store.user.vip_status === 1" :src="ICON_ANNUAL_VIP" @error="(e) => e.target.style.display='none'" draggable="false"
                   class="absolute bottom-0 right-0 w-9 h-9 z-20 drop-shadow-2xl animate-bounce-slow object-contain" />
             </a>
           </div>

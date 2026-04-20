@@ -11,6 +11,26 @@
   will-change: transform;
 }
 
+/* 全局图片平滑采样 + GPU 加速 + 禁用拖拽 */
+img {
+  image-rendering: auto;
+  image-rendering: -webkit-optimize-contrast;
+  -ms-interpolation-mode: bicubic; /* IE 兼容 */
+  transform: translateZ(0); /* 强制 GPU 加速，保持在合成层 */
+  backface-visibility: hidden; /* 防止背面闪烁 */
+  user-select: none; /* 禁止选中 */
+  -webkit-user-select: none;
+  -webkit-user-drag: none; /* 禁止拖拽 */
+  user-drag: none;
+  pointer-events: none; /* 禁止鼠标事件 */
+}
+
+/* 禁用链接拖拽 */
+a {
+  -webkit-user-drag: none;
+  user-drag: none;
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

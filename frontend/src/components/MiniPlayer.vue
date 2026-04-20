@@ -27,7 +27,7 @@ function handleTogglePlay() {
     
     <!-- 封面图 -->
     <div class="w-20 h-20 shrink-0 relative overflow-hidden">
-      <img v-if="store.currentVideo" :src="store.formatImg(store.currentVideo.pic)" class="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" />
+      <img v-if="store.currentVideo" :src="store.formatImg(store.currentVideo.pic, '320w_320h_1c_1s.webp')" @error="(e) => { if (e.target.src.indexOf('default-cover.svg') === -1) e.target.src = '/default-cover.svg' }" class="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" style="image-rendering: auto; transform: translateZ(0); backface-visibility: hidden;" />
       <div v-else class="w-full h-full bg-gray-100 dark:bg-white/5 flex items-center justify-center">
         <div class="w-2 h-2 bg-primary-500 rounded-full animate-ping"></div>
       </div>

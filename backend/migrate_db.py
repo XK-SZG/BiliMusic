@@ -44,6 +44,37 @@ def run_migrations():
         if 'order_index' not in columns:
             logger.info("正在迁移数据库: 添加 order_index 列到 videos...")
             cursor.execute("ALTER TABLE videos ADD COLUMN order_index INTEGER DEFAULT 0")
+        
+        # 3. 迁移：添加 download_retry_count
+        if 'download_retry_count' not in columns:
+            logger.info("正在迁移数据库: 添加 download_retry_count 列...")
+            cursor.execute("ALTER TABLE videos ADD COLUMN download_retry_count INTEGER DEFAULT 0")
+        
+        # 4. 迁移：为 completed 状态但 local_path 为空的记录填充路径
+        logger.info("正在迁移数据库: 填充 local_path...")
+        from .core.paths import DATA_DIR
+        download_path = os.path.join(DATA_DIR, "downloads")
+        
+        cursor.execute("""
+            SELECT bvid FROM videos
+            WHERE download_status = 'completed'
+            AND (local_path IS NULL OR local_path = '')
+            AND is_local = 0
+        """)
+        videos_to_fix = cursor.fetchall()
+        
+        fixed_count = 0
+        for (bvid,) in videos_to_fix:
+            expected_path = os.path.join(download_path, f"{bvid}.mp4")
+            if os.path.exists(expected_path):
+                cursor.execute(
+                    "UPDATE videos SET local_path = ? WHERE bvid = ?",
+                    (expected_path, bvid)
+                )
+                fixed_count += 1
+        
+        if fixed_count > 0:
+            logger.info(f"已为 {fixed_count} 个视频填充 local_path")
 
         # 获取 collections 表的所有列名
         cursor.execute("PRAGMA table_info(collections)")
@@ -52,6 +83,24 @@ def run_migrations():
             logger.info("正在迁移数据库: 添加 order_index 列到 collections...")
             cursor.execute("ALTER TABLE collections ADD COLUMN order_index INTEGER DEFAULT 0")
             
+        # 5. 迁移：为关键字段添加索引以提升查询性能
+        logger.info("正在迁移数据库: 检查并创建索引...")
+        # 检查是否已存在索引
+        cursor.execute("PRAGMA index_list(videos)")
+        existing_indexes = [info[1] for info in cursor.fetchall()]
+        
+        if 'ix_videos_download_status' not in existing_indexes:
+            logger.info("创建索引: ix_videos_download_status")
+            cursor.execute("CREATE INDEX ix_videos_download_status ON videos (download_status)")
+            
+        if 'ix_videos_is_local' not in existing_indexes:
+            logger.info("创建索引: ix_videos_is_local")
+            cursor.execute("CREATE INDEX ix_videos_is_local ON videos (is_local)")
+            
+        if 'ix_videos_owner' not in existing_indexes:
+            logger.info("创建索引: ix_videos_owner")
+            cursor.execute("CREATE INDEX ix_videos_owner ON videos (owner)")
+
         conn.commit()
         logger.info("数据库迁移检查完成")
         

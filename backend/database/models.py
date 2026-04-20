@@ -26,20 +26,21 @@ class Video(Base):
     __tablename__ = 'videos'
     bvid = Column(String, primary_key=True)
     title = Column(String)
-    owner = Column(String)
+    owner = Column(String, index=True)
     pic = Column(String)
     duration = Column(Integer)
     score = Column(Float, default=5.0)
     local_path = Column(String, nullable=True)
-    added_at = Column(DateTime, default=datetime.utcnow)
-    download_status = Column(String, default='not_downloaded') # not_downloaded, pending, downloading, completed, failed
+    added_at = Column(DateTime, default=datetime.now)
+    download_status = Column(String, default='not_downloaded', index=True) # not_downloaded, pending, downloading, completed, failed
+    download_retry_count = Column(Integer, default=0) # 下载重试次数
     
     # 软裁剪字段
     trim_start = Column(Float, default=0.0)
     trim_end = Column(Float, default=0.0)
 
     # 来源标识与本地扩展
-    is_local = Column(Integer, default=0) # 0: Bili, 1: Local
+    is_local = Column(Integer, default=0, index=True) # 0: Bili, 1: Local
     local_mimetype = Column(String, nullable=True) # 记录原始文件类型 (如 audio/mpeg)
     
     # 排序权重
@@ -71,3 +72,20 @@ class Theme(Base):
     is_default = Column(Integer, default=0) # 0: False, 1: True
     settings = Column(Text, nullable=False) # JSON
     backgrounds = Column(Text, nullable=True) # JSON
+
+class PlayRecord(Base):
+    __tablename__ = 'play_records'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    video_bvid = Column(String, ForeignKey('videos.bvid', ondelete="CASCADE"), index=True)
+    played_at = Column(DateTime, default=datetime.now, index=True)
+    play_duration = Column(Integer, default=0) # 播放时长(秒)
+    
+    video = relationship("Video")
+
+class DailyStat(Base):
+    __tablename__ = 'daily_stats'
+    date = Column(String, primary_key=True) # YYYY-MM-DD
+    app_usage_time = Column(Integer, default=0) # 软件使用时长(秒)
+    video_play_time = Column(Integer, default=0) # 视频播放总时长(秒)
+    network_traffic = Column(Integer, default=0) # 网络流量消耗(字节)
+    uncached_traffic = Column(Integer, default=0) # 未缓存视频流量消耗(字节)

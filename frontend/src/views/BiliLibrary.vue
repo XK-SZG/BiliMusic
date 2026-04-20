@@ -5,6 +5,7 @@
 import { ref, onMounted, onUnmounted, computed, reactive, watch, nextTick } from 'vue'
 import { usePlayerStore } from '../stores/modules/player'
 import UniversalModal from '../components/UniversalModal.vue'
+import ContextMenu from '../components/ContextMenu.vue'
 import localApi from '../api/local'
 import {
   PlayIcon,
@@ -15,7 +16,11 @@ import {
   FolderIcon,
   SquaresPlusIcon,
   SparklesIcon,
-  PlusIcon
+  PlusIcon,
+  MusicalNoteIcon,
+  QueueListIcon,
+  CloudArrowDownIcon,
+  LinkIcon
 } from '@heroicons/vue/24/solid'
 
 const store = usePlayerStore()
@@ -88,10 +93,18 @@ onUnmounted(() => {
   if (observer) observer.disconnect()
 })
 
-function getFolderCover(folder) {
-  if (folder.cover && folder.cover !== '') return store.formatImg(folder.cover)
+function getFolderCover(folder, size = '640w_640h_1c_1s.webp') {
+  if (folder.cover && folder.cover !== '') return store.formatImg(folder.cover, size)
   const cached = store.folderCache[String(folder.id)]
-  if (cached && cached.length > 0) return store.formatImg(cached[0].cover || cached[0].pic)
+  if (cached && cached.length > 0) {
+    for (let i = 0; i < Math.min(5, cached.length); i++) {
+      const cover = cached[i].cover || cached[i].pic;
+      // 检查空字符串，由于代理等原因失效图片可能是特定的字符串或空，这里检查空
+      if (cover && cover.trim() !== '') {
+        return store.formatImg(cover, size);
+      }
+    }
+  }
   return null
 }
 
@@ -103,7 +116,11 @@ const setupObserver = () => {
       if (pageInfo.value?.hasMore) checkAndLoadMore()
     }
   }, { root: scrollContainer.value, rootMargin: '400px' })
-  if (loadTrigger.value) observer.observe(loadTrigger.value)
+  
+  // 必须在 nextTick 后绑定，确保 DOM 已渲染
+  nextTick(() => {
+    if (loadTrigger.value) observer.observe(loadTrigger.value)
+  })
 }
 
 async function checkAndLoadMore() {
@@ -113,10 +130,19 @@ async function checkAndLoadMore() {
   isLoading.value = false
   
   await nextTick()
+  // 必须重置 IntersectionObserver 的探测机制，因为列表变长后触发器元素位置可能被覆盖
+  // 在拉取多页大文件夹时这是核心死循环/断链修复逻辑
+  if (pageInfo.value?.hasMore) {
+      setupObserver()
+  }
+  
   // 如果内容仍未填满屏幕，递归拉取
   const rect = loadTrigger.value?.getBoundingClientRect()
-  if (rect && rect.top < window.innerHeight) {
-    checkAndLoadMore()
+  if (rect && rect.top < window.innerHeight + 400 && pageInfo.value?.hasMore) {
+    // 使用 setTimeout 避免堆栈溢出并给予浏览器渲染间隙
+    setTimeout(() => {
+        checkAndLoadMore()
+    }, 100)
   }
 }
 
@@ -159,12 +185,19 @@ async function toggleSelectAll() {
 }
 
 function handleCardClick(event, bvid, index) {
+  // 阻止默认行为以防选择文本
+  if (event.shiftKey) event.preventDefault()
+
   if (event.shiftKey && lastSelectedIndex.value !== -1) {
     const start = Math.min(lastSelectedIndex.value, index); const end = Math.max(lastSelectedIndex.value, index)
     const rangeBvids = filteredVideos.value.slice(start, end + 1).map(v => v.bvid)
-    if (store.selectedBiliBvids.includes(filteredVideos.value[lastSelectedIndex.value].bvid)) {
+    
+    const isAdding = !store.selectedBiliBvids.includes(bvid)
+    if (isAdding) {
+      store.selectedBiliBvids = Array.from(new Set([...store.selectedBiliBvids, ...rangeBvids]))
+    } else {
       store.selectedBiliBvids = store.selectedBiliBvids.filter(id => !rangeBvids.includes(id))
-    } else { store.selectedBiliBvids = Array.from(new Set([...store.selectedBiliBvids, ...rangeBvids])) }
+    }
   } else {
     const idx = store.selectedBiliBvids.indexOf(bvid)
     if (idx > -1) store.selectedBiliBvids.splice(idx, 1); else store.selectedBiliBvids.push(bvid)
@@ -178,9 +211,17 @@ function handlePlay(video) {
   if (localV && localV.download_status === 'completed') {
     store.playVideo({ ...pObj, ...localV, download_status: 'completed' })
   } else {
-    modalState.type = 'confirm'; modalState.title = '正在播放网络流'
-    modalState.extraData = { message: '视频未缓存，是否同步加入下载队列？', confirmText: '缓存并播放', cancelText: '仅播放' }
-    modalState.callback = (conf) => { store.playVideo(pObj, conf); modalState.show = false }
+    modalState.type = 'confirm'
+    modalState.title = '正在播放网络流'
+    modalState.extraData = { message: '视频未缓存，是否同步加入下载队列？', confirmText: '缓存并播放', cancelText: '仅播放', requireConfirm: true }
+    modalState.callback = (conf) => {
+      if (conf !== null) {
+        store.playVideo(pObj, conf === true);
+        modalState.show = false
+      } else {
+        modalState.show = false
+      }
+    }
     modalState.show = true
   }
 }
@@ -192,8 +233,15 @@ function handleAddToQueue(video) {
     store.addToQueue({ ...pObj, ...localV, download_status: 'completed' })
   } else {
     modalState.type = 'confirm'; modalState.title = '加入播放队列'
-    modalState.extraData = { message: '视频未缓存，是否同步加入下载队列？', confirmText: '缓存并加入', cancelText: '仅加入' }
-    modalState.callback = (conf) => { store.addToQueue(pObj, conf); modalState.show = false }
+    modalState.extraData = { message: '视频未缓存，是否同步加入下载队列？', confirmText: '缓存并加入', cancelText: '仅加入', requireConfirm: true }
+    modalState.callback = (conf) => {
+      if (conf !== null) {
+        store.addToQueue(pObj, conf === true);
+        modalState.show = false
+      } else {
+        modalState.show = false
+      }
+    }
     modalState.show = true
   }
 }
@@ -204,8 +252,16 @@ function handleBatchPlay() {
   const hasUn = sel.some(v => !store.localVideos.find(lv => lv.bvid === v.bvid)?.download_status === 'completed')
   if (hasUn) {
     modalState.type = 'confirm'; modalState.title = '正在播放网络流'
-    modalState.extraData = { message: '部分视频未缓存，是否同步执行缓存？', confirmText: '缓存并播放', cancelText: '仅播放' }
-    modalState.callback = (conf) => { store.playList(sel, 0, conf); store.selectedBiliBvids = []; modalState.show = false }
+    modalState.extraData = { message: '部分视频未缓存，是否同步执行缓存？', confirmText: '缓存并播放', cancelText: '仅播放', requireConfirm: true }
+    modalState.callback = (conf) => {
+      if (conf !== null) {
+        store.playList(sel, 0, conf === true);
+        store.selectedBiliBvids = [];
+        modalState.show = false
+      } else {
+        modalState.show = false
+      }
+    }
     modalState.show = true
   } else { store.playList(sel); store.selectedBiliBvids = [] }
 }
@@ -216,8 +272,16 @@ function handleBatchQueue() {
   const hasUn = sel.some(v => !store.localVideos.find(lv => lv.bvid === v.bvid)?.download_status === 'completed')
   if (hasUn) {
     modalState.type = 'confirm'; modalState.title = '加入播放队列'
-    modalState.extraData = { message: '部分视频未缓存，是否同步执行缓存？', confirmText: '缓存并加入', cancelText: '仅加入' }
-    modalState.callback = (conf) => { store.addToQueueList(sel, conf); store.selectedBiliBvids = []; modalState.show = false }
+    modalState.extraData = { message: '部分视频未缓存，是否同步执行缓存？', confirmText: '缓存并加入', cancelText: '仅加入', requireConfirm: true }
+    modalState.callback = (conf) => {
+      if (conf !== null) {
+        store.addToQueueList(sel, conf === true);
+        store.selectedBiliBvids = [];
+        modalState.show = false
+      } else {
+        modalState.show = false
+      }
+    }
     modalState.show = true
   } else { store.addToQueueList(sel); store.selectedBiliBvids = [] }
 }
@@ -225,13 +289,35 @@ function handleBatchQueue() {
 async function handleExpand(video) { isExpanding.value = video.bvid; await store.expandVideoParts(currentFolderId.value, video); isExpanding.value = null }
 function openSyncModal(vOrL) {
   const vList = Array.isArray(vOrL) ? vOrL : [vOrL]; const opts = store.localCollections.map(c => ({ id: c.id, label: c.title }))
-  modalState.type = 'checklist'; modalState.title = '同步到本地媒体夹'; modalState.extraData = { options: opts }
+  modalState.type = 'checklist'; modalState.title = '同步到本地媒体夹'; modalState.extraData = { options: opts, allowCreate: true }
   modalState.callback = async (cIds) => {
-    if (!cIds) return
-    isLoading.value = true; try { for (const v of vList) await store.updateVideoCollections(v, cIds); store.selectedBiliBvids = []; store.showToast("同步完成", "success") } 
+    if (!cIds || cIds.length === 0) {
+      store.showToast("请先选择一个本地媒体库", "error")
+      return
+    }
+    isLoading.value = true; try { for (const v of vList) await store.updateVideoCollections(v, cIds); store.selectedBiliBvids = []; store.showToast("同步完成", "success") }
     finally { isLoading.value = false; modalState.show = false }
   }
   modalState.show = true
+}
+
+async function handleCreateCollection(name) {
+  if (!name) return
+  const exists = store.localCollections.some(c => c.title === name)
+  if (exists) {
+    store.showToast("媒体库名称已存在", "error")
+    return
+  }
+  try {
+    await localApi.createCollection(name)
+    await store.fetchLocalCollections()
+    store.showToast("媒体库创建成功", "success")
+    // 更新弹窗选项
+    modalState.extraData.options = store.localCollections.map(c => ({ id: c.id, label: c.title }))
+  } catch (e) {
+    console.error('创建媒体库失败:', e)
+    store.showToast('创建媒体库失败', 'error')
+  }
 }
 async function removeSync(bvid, colId) {
   modalState.type = 'confirm'; modalState.title = '取消关联'
@@ -251,17 +337,101 @@ function openBiliVideo(bvid) {
 }
 
 const isExpanding = ref(null)
+
+// 右键菜单状态
+const contextMenu = reactive({
+  visible: false,
+  x: 0,
+  y: 0,
+  video: null
+})
+
+// 显示右键菜单
+function showContextMenu(event, video) {
+  event.preventDefault()
+  event.stopPropagation()
+  contextMenu.video = video
+  contextMenu.x = event.clientX
+  contextMenu.y = event.clientY
+  contextMenu.visible = true
+}
+
+// 右键菜单项
+const contextMenuItems = computed(() => {
+  if (!contextMenu.video) return []
+  
+  const video = contextMenu.video
+  const localV = store.localVideos.find(v => v.bvid === video.bvid)
+  const isCached = localV && localV.download_status === 'completed'
+  const isMultiPart = video.page > 1 && !video.is_part
+  
+  return [
+    {
+      label: '播放',
+      icon: PlayIcon,
+      action: () => handlePlay(video)
+    },
+    {
+      label: '添加到播放队列',
+      icon: QueueListIcon,
+      action: () => handleAddToQueue(video)
+    },
+    {
+      type: 'divider'
+    },
+    {
+      label: isMultiPart ? `展开 ${video.page} 集` : '同步到本地媒体库',
+      icon: isMultiPart ? SquaresPlusIcon : ArrowPathIcon,
+      action: () => isMultiPart ? handleExpand(video) : openSyncModal(video)
+    },
+    {
+      label: isCached ? '已缓存' : '下载缓存',
+      icon: CloudArrowDownIcon,
+      disabled: isCached,
+      action: () => !isCached && store.addToDownload(video.bvid)
+    },
+    {
+      type: 'divider'
+    },
+    {
+      label: '在B站打开',
+      icon: LinkIcon,
+      action: () => openBiliVideo(video.bvid)
+    }
+  ]
+})
+
+// 处理右键菜单选择
+function handleContextMenuSelect(item) {
+  if (item.action) {
+    item.action()
+  }
+  contextMenu.visible = false
+}
 </script>
 
 <template>
   <div class="h-full flex flex-col animate-fade-in relative">
-    <UniversalModal :show="modalState.show" :type="modalState.type" :title="modalState.title" :initial-value="modalState.initialValue" :extra-data="modalState.extraData" @close="modalState.show = false" @confirm="(val) => modalState.callback && modalState.callback(val)" />
+    <UniversalModal :show="modalState.show" :type="modalState.type" :title="modalState.title" :initial-value="modalState.initialValue" :extra-data="modalState.extraData" @close="() => { modalState.show = false }" @confirm="(val) => { modalState.callback && modalState.callback(val) }" @create-collection="handleCreateCollection" />
+    
+    <!-- 右键菜单 -->
+    <ContextMenu
+      :visible="contextMenu.visible"
+      :x="contextMenu.x"
+      :y="contextMenu.y"
+      :items="contextMenuItems"
+      @close="contextMenu.visible = false"
+      @select="handleContextMenuSelect"
+    />
 
     <div v-if="!currentFolderId" class="flex-1 overflow-y-auto pr-2 scrollbar-thin">
        <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 2xl:grid-cols-6 gap-6">
           <div v-for="folder in store.biliFolders" :key="folder.id" @click="openFolder(folder.id)"
                class="relative aspect-square rounded-[2.5rem] cursor-pointer overflow-hidden group bg-gray-100 dark:bg-gray-800 transition-all duration-200 border border-transparent hover:border-primary-500 shadow-sm hover:shadow-2xl hover:-translate-y-1">
-             <img v-if="getFolderCover(folder)" :src="getFolderCover(folder)" class="absolute inset-0 w-full h-full object-cover transition-transform duration-1000 group-hover:scale-110" />
+             <img v-if="getFolderCover(folder)" :src="getFolderCover(folder, '640w_640h_1c_1s.webp')" @error="(e) => e.target.style.display='none'" class="absolute inset-0 w-full h-full object-cover transition-transform duration-1000 group-hover:scale-110 rounded-[2.5rem]" style="image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges;" />
+             <div v-else class="absolute inset-0 w-full h-full object-cover transition-transform duration-1000 group-hover:scale-110 rounded-[2.5rem] bg-gradient-to-br from-gray-200 to-gray-300 dark:from-gray-700 dark:to-gray-800 flex items-center justify-center">
+                 <MusicalNoteIcon class="w-16 h-16 text-gray-400/50 dark:text-gray-500/50" />
+             </div>
              <div class="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent"></div>
              <div class="absolute bottom-6 left-6 right-6 text-white"><h3 class="font-bold truncate text-lg drop-shadow-xl">{{ folder.title }}</h3><p class="text-[10px] font-black opacity-60 uppercase tracking-[0.2em] mt-1">{{ folder.media_count }} 视频</p></div>
              <div class="absolute inset-0 flex items-center justify-center bg-primary-500/10 opacity-0 group-hover:opacity-100 transition-opacity"><FolderIcon class="w-12 h-12 text-white/20" /></div>
@@ -286,30 +456,47 @@ const isExpanding = ref(null)
               <button @click.stop="isSearchMenuOpen = !isSearchMenuOpen" class="flex items-center gap-2 bg-gray-100 dark:bg-white/5 px-4 py-2.5 rounded-2xl text-xs font-bold text-gray-600 dark:text-gray-300 hover:text-primary-500 transition"><span>{{ searchOptions.find(o => o.val === searchMode)?.label }}</span><ChevronLeftIcon class="-rotate-90 w-3 h-3" /></button>
               <div v-if="isSearchMenuOpen" class="absolute top-full right-0 mt-2 w-32 bg-white dark:bg-gray-800 rounded-xl shadow-xl border border-gray-100 dark:border-white/5 z-[100] p-1"><button v-for="opt in searchOptions" :key="opt.val" @click="searchMode = opt.val; isSearchMenuOpen = false" :class="searchMode === opt.val ? 'text-primary-500 bg-primary-50 dark:bg-white/5' : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-white/5'" class="w-full text-left px-4 py-2 rounded-lg text-xs font-bold transition-all">{{ opt.label }}</button></div>
            </div>
-           <div v-else class="flex bg-gray-100 dark:bg-white/5 p-1 rounded-xl shrink-0"><button v-for="opt in searchOptions" :key="opt.val" @click="searchMode = opt.val" :class="searchMode === opt.val ? 'bg-white dark:bg-gray-700 text-primary-500 shadow-sm' : 'text-gray-400 hover:text-gray-600'" class="px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase transition-all">{{ opt.label }}</button></div>
+           <div v-else class="flex bg-gray-100 dark:bg-white/5 p-1 rounded-xl shrink-0">
+             <button v-for="opt in searchOptions" :key="opt.val"
+                     @click="searchMode = opt.val"
+                     :class="searchMode === opt.val ? 'bg-white dark:bg-gray-700 text-primary-500 shadow-sm' : 'text-gray-400 hover:text-gray-600'"
+                     class="px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase transition-all relative group/tooltip"
+                     :title="opt.val === 'regex' ? '支持JavaScript正则表达式语法，如 ^开头$ 结尾 .任意字符 .*任意内容 [abc]字符集 (a|b)或' : ''">
+               {{ opt.label }}
+               <div v-if="opt.val === 'regex'" class="absolute top-full left-1/2 -translate-x-1/2 mt-2 px-3 py-2 bg-gray-900 dark:bg-gray-800 text-white text-[10px] rounded-xl shadow-2xl border border-white/10 opacity-0 group-hover/tooltip:opacity-100 pointer-events-none transition-opacity duration-200 whitespace-nowrap z-50">
+                 <div class="absolute bottom-full left-1/2 -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-b-4 border-transparent border-b-gray-900 dark:border-b-gray-800"></div>
+                 <div class="font-black mb-1 text-primary-400">正则表达式帮助</div>
+                 <div class="space-y-0.5 text-left">
+                   <div><span class="text-yellow-400">^</span> 匹配开头 | <span class="text-yellow-400">$</span> 匹配结尾</div>
+                   <div><span class="text-yellow-400">.</span> 任意字符 | <span class="text-yellow-400">.*</span> 任意内容</div>
+                   <div><span class="text-yellow-400">[abc]</span> 字符集 | <span class="text-yellow-400">(a|b)</span> 或</div>
+                 </div>
+               </div>
+             </button>
+           </div>
         </div>
 
         <div v-else class="flex-1 flex flex-wrap items-center gap-2 animate-fade-in">
            <span class="px-3 py-1.5 bg-primary-500 text-white rounded-xl text-xs font-black shadow-lg shadow-primary-500/30 whitespace-nowrap">已选 {{ selectionCount }}</span>
-           <button @click="handleBatchPlay" class="px-4 py-2 bg-primary-600 text-white rounded-2xl text-xs font-bold hover:bg-primary-700 transition flex items-center gap-2 shadow-lg shadow-primary-500/20"><PlayIcon class="w-4 h-4" /> <span v-if="windowWidth >= 1200">批量播放</span></button>
-           <button @click="handleBatchQueue" class="px-4 py-2 bg-purple-600 text-white rounded-2xl text-xs font-bold hover:bg-purple-700 transition flex items-center gap-2 shadow-lg shadow-purple-500/20"><PlusIcon class="w-4 h-4" /> <span v-if="windowWidth >= 1200">批量队列</span></button>
-           <button @click="openSyncModal(currentVideos.filter(v => store.selectedBiliBvids.includes(v.bvid)))" class="px-4 py-2 bg-blue-600 text-white rounded-2xl text-xs font-bold hover:bg-blue-700 transition flex items-center gap-2 shadow-lg shadow-blue-500/20"><ArrowPathIcon class="w-4 h-4" /> <span v-if="windowWidth >= 1200">批量同步</span></button>
+           <button @click="handleBatchPlay" class="px-4 py-2 bg-primary-600 text-white rounded-2xl text-xs font-bold hover:bg-primary-700 transition flex items-center gap-2 shadow-lg shadow-primary-500/20"><PlayIcon class="w-4 h-4" /> <span>批量播放</span></button>
+           <button @click="handleBatchQueue" class="px-4 py-2 bg-purple-600 text-white rounded-2xl text-xs font-bold hover:bg-purple-700 transition flex items-center gap-2 shadow-lg shadow-purple-500/20"><PlusIcon class="w-4 h-4" /> <span>批量队列</span></button>
+           <button @click="openSyncModal(currentVideos.filter(v => store.selectedBiliBvids.includes(v.bvid)))" class="px-4 py-2 bg-blue-600 text-white rounded-2xl text-xs font-bold hover:bg-blue-700 transition flex items-center gap-2 shadow-lg shadow-blue-500/20"><ArrowPathIcon class="w-4 h-4" /> <span>批量同步</span></button>
            <button @click="store.selectedBiliBvids = []" class="ml-auto text-xs text-gray-400 font-bold px-4 hover:text-primary-500">取消</button>
         </div>
       </div>
 
       <div ref="scrollContainer" class="flex-1 overflow-y-auto pr-2 scrollbar-thin">
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4 lg:gap-6 pb-20">
+        <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-4 lg:gap-6 pb-20 auto-rows-fr p-2">
           <div v-for="(v, index) in filteredVideos" :key="v.bvid" @click="handleCardClick($event, v.bvid, index)"
-               class="group relative flex flex-col bg-white dark:bg-white/5 rounded-[2rem] overflow-hidden border border-gray-200 dark:border-white/5 transition-all cursor-pointer hover:shadow-2xl hover:-translate-y-1"
-               :class="{'ring-2 ring-primary-500 ring-offset-4 dark:ring-offset-black shadow-xl': store.selectedBiliBvids.includes(v.bvid)}">
-            <div class="w-full aspect-video relative bg-gray-200 dark:bg-gray-900 overflow-hidden shrink-0"
-                 @contextmenu.prevent="openBiliVideo(v.bvid)">
-              <img :src="store.formatImg(v.cover || v.pic)" class="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" />
+               @contextmenu="showContextMenu($event, v)"
+               class="group relative flex flex-col bg-white dark:bg-white/5 rounded-[2rem] overflow-visible transition-all cursor-pointer hover:shadow-2xl hover:-translate-y-1 box-border"
+               :class="store.selectedBiliBvids.includes(v.bvid) ? 'ring-4 ring-primary-500 ring-offset-0 shadow-xl' : 'border border-gray-200 dark:border-white/5'">
+            <div class="w-full aspect-video relative bg-gray-200 dark:bg-gray-900 overflow-hidden shrink-0 rounded-t-[2rem]">
+              <img :src="store.formatImg(v.cover || v.pic, '640w_360h_1c_1s.webp')" @error="(e) => { if (e.target.src.indexOf('default-cover.svg') === -1) e.target.src = '/default-cover.svg' }" class="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110 rounded-t-[2rem]" style="image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges;" />
               <div v-if="store.selectedBiliBvids.includes(v.bvid)" class="absolute inset-0 bg-primary-500/20 flex items-center justify-center backdrop-blur-[2px]"><CheckCircleIcon class="w-12 h-12 text-white drop-shadow-lg" /></div>
-              <div v-else class="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity gap-3 bg-black/40">
+              <div v-else class="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity gap-2 bg-black/40 p-2">
                  <template v-if="v.page > 1 && !v.is_part"><button @click.stop="handleExpand(v)" :disabled="isExpanding === v.bvid" class="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-full text-xs font-bold shadow-xl hover:bg-purple-700 transition-all"><SquaresPlusIcon v-if="isExpanding !== v.bvid" class="w-5 h-5" /><ArrowPathIcon v-else class="w-5 h-5 animate-spin" />{{ isExpanding === v.bvid ? '展开中' : `展开 ${v.page} 集` }}</button></template>
-                 <template v-else><button @click.stop="handlePlay(v)" class="w-12 h-12 bg-white rounded-full flex items-center justify-center text-primary-500 shadow-xl hover:scale-110 transition-all"><PlayIcon class="w-6 h-6 ml-0.5" /></button><button @click.stop="handleAddToQueue(v)" class="w-12 h-12 bg-white rounded-full flex items-center justify-center text-purple-500 shadow-xl hover:scale-110 transition-all"><PlusIcon class="w-6 h-6" /></button><button @click.stop="openSyncModal(v)" class="w-12 h-12 bg-white rounded-full flex items-center justify-center text-blue-500 shadow-xl hover:scale-110 transition-all"><ArrowPathIcon class="w-6 h-6" /></button></template>
+                 <template v-else><button @click.stop="handlePlay(v)" class="w-10 h-10 sm:w-12 sm:h-12 bg-white rounded-full flex items-center justify-center text-primary-500 shadow-xl hover:scale-110 transition-all shrink-0"><PlayIcon class="w-5 h-5 sm:w-6 sm:h-6 ml-0.5" /></button><button @click.stop="handleAddToQueue(v)" class="w-10 h-10 sm:w-12 sm:h-12 bg-white rounded-full flex items-center justify-center text-purple-500 shadow-xl hover:scale-110 transition-all shrink-0"><PlusIcon class="w-5 h-5 sm:w-6 sm:h-6" /></button><button @click.stop="openSyncModal(v)" class="w-10 h-10 sm:w-12 sm:h-12 bg-white rounded-full flex items-center justify-center text-blue-500 shadow-xl hover:scale-110 transition-all shrink-0"><ArrowPathIcon class="w-5 h-5 sm:w-6 sm:h-6" /></button></template>
               </div>
               <div class="absolute bottom-2 left-2 px-1.5 py-0.5 bg-black/60 backdrop-blur-md rounded-md text-[9px] text-white font-bold border border-white/10 flex items-center gap-1"><span v-if="v.is_part" class="text-primary-400 font-black">分P</span>{{ Math.floor(v.duration / 60) }}:{{ (v.duration % 60).toString().padStart(2, '0') }}</div>
             </div>

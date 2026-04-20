@@ -9,15 +9,17 @@ const props = defineProps({
   extraData: Object
 })
 
-import { XMarkIcon, CheckIcon, ArrowsRightLeftIcon } from '@heroicons/vue/24/solid'
+import { XMarkIcon, CheckIcon, ArrowsRightLeftIcon, PlusIcon } from '@heroicons/vue/24/solid'
 
-const emit = defineEmits(['close', 'confirm', 'remove-tag'])
+const emit = defineEmits(['close', 'confirm', 'remove-tag', 'create-collection'])
 
 // 状态定义
 const inputValue = ref('')
 const scoreValue = ref(5.0)
 const newTag = ref('')
 const selectedOptions = ref([])
+const showCreateCollection = ref(false)
+const newCollectionName = ref('')
 
 // Range 模式
 const rangeStart = ref(0)
@@ -40,6 +42,8 @@ watch(() => props.show, (isShowing) => {
     }
     if (props.type === 'checklist') {
       selectedOptions.value = Array.isArray(props.initialValue) ? [...props.initialValue] : []
+      showCreateCollection.value = false
+      newCollectionName.value = ''
     }
     if (props.type === 'range') {
       rangeStart.value = props.initialValue?.start || 0
@@ -69,7 +73,33 @@ function handleCoverChange(e) {
 }
 
 function handleCancel() {
-  if (props.type === 'confirm') emit('confirm', false)
+  console.log('[UniversalModal] handleCancel 被调用, type:', props.type, 'requireConfirm:', props.extraData?.requireConfirm)
+  if (props.type === 'confirm') {
+    // 如果设置了 requireConfirm，点击取消或遮罩层应该传递 null 表示取消操作
+    if (props.extraData?.requireConfirm) {
+      console.log('[UniversalModal] emit confirm(null) - 取消操作')
+      emit('confirm', null)
+      // 延迟emit close，确保confirm事件先被处理
+      setTimeout(() => {
+        console.log('[UniversalModal] emit close() (延迟)')
+        emit('close')
+      }, 0)
+      return
+    }
+  }
+  console.log('[UniversalModal] emit close()')
+  emit('close')
+}
+
+function handleCancelButton() {
+  if (props.type === 'confirm' && props.extraData?.requireConfirm) {
+    // 点击取消按钮时传递 false 表示"仅播放"
+    emit('confirm', false)
+    setTimeout(() => {
+      emit('close')
+    }, 0)
+    return
+  }
   emit('close')
 }
 
@@ -109,13 +139,21 @@ function toggleOption(id) {
   if (idx > -1) selectedOptions.value.splice(idx, 1)
   else selectedOptions.value.push(id)
 }
+
+async function handleCreateCollection() {
+  if (!newCollectionName.value.trim()) return
+  
+  emit('create-collection', newCollectionName.value.trim())
+  newCollectionName.value = ''
+  showCreateCollection.value = false
+}
 </script>
 
 <template>
   <Teleport to="body">
     <transition name="fade">
       <div v-if="show" class="fixed inset-0 z-[9999] flex items-center justify-center p-4">
-        <div class="absolute inset-0 bg-black/70 backdrop-blur-md" @click="handleCancel"></div>
+        <div class="absolute inset-0 bg-black/70 backdrop-blur-md" @click.self="handleCancel"></div>
 
       <div class="relative bg-white dark:bg-gray-900 w-full max-w-sm rounded-3xl shadow-2xl overflow-hidden border border-gray-100 dark:border-white/10 p-8 transform transition-all"
            :class="{'border-red-500/50': extraData?.isDanger}">
@@ -128,7 +166,7 @@ function toggleOption(id) {
         <!-- 1. 普通输入模式 -->
         <div v-if="type === 'input'">
           <input v-model="inputValue" @keyup.enter="handleConfirm"
-                 class="w-full bg-gray-100 dark:bg-white/5 border border-gray-200 dark:border-white/10 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-pink-500 font-medium"
+                 class="w-full bg-gray-100 dark:bg-white/5 border border-gray-200 dark:border-white/10 rounded-2xl px-5 py-4 outline-none focus:ring-2 focus:ring-pink-500 font-medium text-gray-800 dark:text-white placeholder-gray-400 dark:placeholder-gray-500"
                  autofocus />
         </div>
 
@@ -152,7 +190,7 @@ function toggleOption(id) {
           </div>
           <div class="flex gap-2">
             <input v-model="newTag" :placeholder="extraData?.placeholder || '输入内容...'" @keyup.enter="handleConfirm"
-                   class="flex-1 bg-gray-100 dark:bg-white/5 border-none rounded-xl px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-pink-500" />
+                   class="flex-1 bg-gray-100 dark:bg-white/5 border-none rounded-xl px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-pink-500 text-gray-800 dark:text-white placeholder-gray-400 dark:placeholder-gray-500" />
             <button @click="handleConfirm" class="px-4 py-2 bg-pink-500 text-white rounded-xl font-bold">添加</button>
           </div>
         </div>
@@ -163,12 +201,12 @@ function toggleOption(id) {
             <div class="space-y-1">
               <label class="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">起始</label>
               <input type="number" v-model.number="rangeStart" step="any"
-                     class="w-full bg-gray-100 dark:bg-white/5 border-none rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-pink-500" />
+                     class="w-full bg-gray-100 dark:bg-white/5 border-none rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-pink-500 text-gray-800 dark:text-white" />
             </div>
             <div class="space-y-1">
               <label class="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">结束</label>
               <input type="number" v-model.number="rangeEnd" step="any"
-                     class="w-full bg-gray-100 dark:bg-white/5 border-none rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-pink-500" />
+                     class="w-full bg-gray-100 dark:bg-white/5 border-none rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-pink-500 text-gray-800 dark:text-white" />
             </div>
           </div>
           <p class="text-[10px] text-gray-400 text-center italic">{{ extraData?.unit || '' }}</p>
@@ -176,8 +214,8 @@ function toggleOption(id) {
 
         <!-- 5. 标题过滤模式 -->
         <div v-if="type === 'title_filter'" class="space-y-4">
-          <input v-model="titleText" placeholder="关键词..." 
-                 class="w-full bg-gray-100 dark:bg-white/5 border-none rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-pink-500" />
+          <input v-model="titleText" placeholder="关键词..."
+                 class="w-full bg-gray-100 dark:bg-white/5 border-none rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-pink-500 text-gray-800 dark:text-white placeholder-gray-400 dark:placeholder-gray-500" />
           <button @click="isStrict = !isStrict" 
                   class="w-full py-3 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2"
                   :class="isStrict ? 'bg-pink-500 text-white shadow-lg' : 'bg-gray-100 dark:bg-white/5 text-gray-500'">
@@ -187,18 +225,51 @@ function toggleOption(id) {
         </div>
 
         <!-- 6. 多选列表模式 (Checklist) -->
-        <div v-if="type === 'checklist'" class="space-y-2 max-h-64 overflow-y-auto scrollbar-thin pr-1">
-          <div v-for="opt in (extraData?.options || [])" :key="opt.id"
-               @click="toggleOption(opt.id)"
-               class="flex items-center justify-between p-4 rounded-2xl cursor-pointer transition-all border"
-               :class="selectedOptions.includes(opt.id)
-                 ? 'bg-pink-500/10 border-pink-500/50 text-pink-500'
-                 : 'bg-gray-50 dark:bg-white/5 border-transparent text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-white/10'">
-            <span class="font-bold text-sm">{{ opt.label }}</span>
-            <div class="w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all"
-                 :class="selectedOptions.includes(opt.id) ? 'bg-pink-500 border-pink-500 scale-110' : 'border-gray-300 dark:border-gray-600'">
-               <CheckIcon v-if="selectedOptions.includes(opt.id)" class="w-4 h-4 text-white" />
+        <div v-if="type === 'checklist'" class="space-y-3">
+          <div class="space-y-2 max-h-64 overflow-y-auto scrollbar-thin pr-1">
+            <div v-for="opt in (extraData?.options || [])" :key="opt.id"
+                 @click="toggleOption(opt.id)"
+                 class="flex items-center justify-between p-4 rounded-2xl cursor-pointer transition-all border"
+                 :class="selectedOptions.includes(opt.id)
+                   ? 'bg-pink-500/10 border-pink-500/50 text-pink-500'
+                   : 'bg-gray-50 dark:bg-white/5 border-transparent text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-white/10'">
+              <span class="font-bold text-sm">{{ opt.label }}</span>
+              <div class="w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all"
+                   :class="selectedOptions.includes(opt.id) ? 'bg-pink-500 border-pink-500 scale-110' : 'border-gray-300 dark:border-gray-600'">
+                 <CheckIcon v-if="selectedOptions.includes(opt.id)" class="w-4 h-4 text-white" />
+              </div>
             </div>
+          </div>
+          
+          <!-- 新建媒体库区域 -->
+          <div v-if="extraData?.allowCreate" class="border-t border-gray-200 dark:border-white/10 pt-3">
+            <transition name="expand">
+              <div v-if="showCreateCollection" class="mb-3 space-y-2">
+                <input
+                  v-model="newCollectionName"
+                  type="text"
+                  placeholder="输入媒体库名称"
+                  class="w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-white/20 rounded-lg text-sm text-gray-800 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-pink-500"
+                  @keyup.enter="handleCreateCollection"
+                  @keyup.esc="showCreateCollection = false" />
+                <div class="flex gap-2">
+                  <button @click="handleCreateCollection" class="flex-1 px-3 py-2 bg-pink-500 text-white rounded-lg text-xs font-bold hover:bg-pink-600 transition active:scale-95">
+                    创建
+                  </button>
+                  <button @click="showCreateCollection = false; newCollectionName = ''" class="px-3 py-2 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg text-xs font-bold hover:bg-gray-300 dark:hover:bg-gray-600 transition active:scale-95">
+                    取消
+                  </button>
+                </div>
+              </div>
+            </transition>
+            
+            <button
+              v-if="!showCreateCollection"
+              @click="showCreateCollection = true"
+              class="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-gray-100 dark:bg-white/5 text-gray-700 dark:text-gray-300 rounded-xl text-sm font-bold hover:bg-gray-200 dark:hover:bg-white/10 transition active:scale-95">
+              <PlusIcon class="w-5 h-5" />
+              <span>新建本地媒体库</span>
+            </button>
           </div>
         </div>
 
@@ -225,7 +296,7 @@ function toggleOption(id) {
 
         <!-- 底部按钮 -->
         <div class="mt-8 flex gap-3">
-          <button @click="handleCancel" class="flex-1 py-3 text-gray-400 font-bold hover:text-gray-600 dark:hover:text-white transition">
+          <button @click="handleCancelButton" class="flex-1 py-3 text-gray-400 font-bold hover:text-gray-600 dark:hover:text-white transition">
             {{ extraData?.cancelText || '取消' }}
           </button>
           <button @click="handleConfirm"
@@ -244,9 +315,27 @@ function toggleOption(id) {
 <style scoped>
 .fade-enter-active, .fade-leave-active { transition: opacity 0.3s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
-input[type=number]::-webkit-inner-spin-button, 
-input[type=number]::-webkit-outer-spin-button { 
-  -webkit-appearance: none; 
-  margin: 0; 
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
+
+.expand-enter-active, .expand-leave-active {
+  transition: all 0.3s ease;
+  overflow: hidden;
+}
+
+.expand-enter-from, .expand-leave-to {
+  opacity: 0;
+  max-height: 0;
+}
+
+.expand-enter-to, .expand-leave-from {
+  opacity: 1;
+  max-height: 200px;
+}
+
+.scrollbar-thin::-webkit-scrollbar { width: 4px; }
+.scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(156, 163, 175, 0.2); border-radius: 10px; }
 </style>

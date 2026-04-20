@@ -14,13 +14,90 @@ from .database import models, db
 from . import migrate_db
 from .services import cleanup_service
 from .dependencies import bili
-from .routers import auth_router, bili_router, local_router, play_router, system_router, theme_router, download_router
+from .routers import auth_router, bili_router, local_router, play_router, system_router, theme_router, download_router, stats_router
 
 # 初始化日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="BiliMusic API")
+
+def verify_completed_downloads(db_session, download_path):
+    """
+    [性能优化] 启动时校验所有 completed 状态的视频文件
+    使用分页查询避免大数据量时的内存占用和启动延迟
+    """
+    from sqlalchemy import func
+    
+    # 先统计总数
+    total_count = db_session.query(func.count(models.Video.bvid)).filter(
+        models.Video.download_status == 'completed',
+        models.Video.is_local != 1  # 排除本地导入的文件
+    ).scalar()
+    
+    if total_count == 0:
+        logger.info("[启动校验] 无需校验的下载文件")
+        return
+    
+    logger.info(f"[启动校验] 开始校验 {total_count} 个已下载文件...")
+    
+    reset_count = 0
+    fixed_count = 0
+    page_size = 100  # 每次处理 100 条
+    
+    # [性能优化] 分页查询，避免一次性加载所有数据
+    for offset in range(0, total_count, page_size):
+        videos = db_session.query(models.Video).filter(
+            models.Video.download_status == 'completed',
+            models.Video.is_local != 1
+        ).limit(page_size).offset(offset).all()
+        
+        for video in videos:
+            # 1. 如果 local_path 存在且文件存在，跳过
+            if video.local_path and os.path.exists(video.local_path):
+                # 检查文件大小
+                if os.path.getsize(video.local_path) < 0.5 * 1024 * 1024:
+                    logger.warning(f"[启动校验] 文件过小，重置状态: {video.bvid}")
+                    video.download_status = 'not_downloaded'
+                    video.local_path = None
+                    reset_count += 1
+                continue
+            
+            # 2. 如果 local_path 为空或文件不存在，尝试查找文件
+            expected_path = os.path.join(download_path, f"{video.bvid}.mp4")
+            
+            if os.path.exists(expected_path):
+                # 检查文件大小
+                if os.path.getsize(expected_path) < 0.5 * 1024 * 1024:
+                    logger.warning(f"[启动校验] 文件过小，重置状态: {video.bvid}")
+                    video.download_status = 'not_downloaded'
+                    video.local_path = None
+                    reset_count += 1
+                else:
+                    # 文件在默认位置，更新 local_path
+                    if not video.local_path:
+                        video.local_path = expected_path
+                        fixed_count += 1
+            else:
+                # 文件不存在，重置状态
+                logger.warning(f"[启动校验] 文件不存在，重置状态: {video.bvid}")
+                video.download_status = 'not_downloaded'
+                video.local_path = None
+                reset_count += 1
+        
+        # [性能优化] 每批次提交一次，避免长事务
+        db_session.commit()
+    
+    logger.info(f"[启动校验] 完成，修复了 {fixed_count} 个 local_path，重置了 {reset_count} 个无效状态")
+
+def async_verify_completed_downloads():
+    """在后台线程中执行文件校验，防止阻塞启动"""
+    from .services.clipboard_service import get_thread_safe_db_session
+    from .services.cleanup_service import DOWNLOAD_PATH
+    import time
+    time.sleep(2)  # 延迟 2 秒后开始校验，避免刚启动时抢占资源
+    with get_thread_safe_db_session() as db_session:
+        verify_completed_downloads(db_session, DOWNLOAD_PATH)
 
 def init_db_and_reset_tasks():
     try:
@@ -32,7 +109,8 @@ def init_db_and_reset_tasks():
     with get_thread_safe_db_session() as db_session:
         db_session.query(models.Video).filter(models.Video.download_status.in_(['pending', 'downloading'])).update({"download_status": "not_downloaded"}, synchronize_session=False)
         db_session.commit()
-        logger.info(">>> 已重置未完成的下载任务状态并完成数据库初始化")
+        logger.info(">>> 已重置未完成的下载任务状态")
+        logger.info(">>> 数据库初始化完成")
 
 # 配置 CORS
 app.add_middleware(
@@ -58,12 +136,14 @@ app.include_router(play_router)
 app.include_router(system_router)
 app.include_router(theme_router)
 app.include_router(download_router)
+app.include_router(stats_router)
 
 # --- 图像防盗链代理接口 ---
 
+from backend.services.cover_cache_service import get_cover_cache_service
+
 @app.get("/api/proxy/image")
-def proxy_image(url: str):
-    import requests
+async def proxy_image(url: str):
     from urllib.parse import urlparse
     
     parsed = urlparse(url)
@@ -71,17 +151,27 @@ def proxy_image(url: str):
     if parsed.netloc not in allowed_hosts or parsed.scheme not in ["http", "https"]:
         raise HTTPException(status_code=403, detail="Invalid image source")
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://www.bilibili.com/"
-    }
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
+        cover_service = get_cover_cache_service()
+        image_data = await cover_service.get_cover(url)
+        
+        if image_data is None:
+            raise HTTPException(status_code=404, detail="Image not found")
+        
+        # 根据 URL 推断 Content-Type
+        content_type = "image/jpeg"
+        if url.endswith(".png"):
+            content_type = "image/png"
+        elif url.endswith(".webp"):
+            content_type = "image/webp"
+        
         return Response(
-            content=resp.content, 
-            media_type=resp.headers.get("Content-Type", "image/jpeg"),
+            content=image_data,
+            media_type=content_type,
             headers={"Cache-Control": "public, max-age=31536000"}
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Image proxy failed: {e}")
         raise HTTPException(status_code=404, detail="Image not found")
@@ -132,8 +222,20 @@ async def startup_event():
     from .services.clipboard_service import watch_clipboard
     # 同步执行数据库初始化，确保表创建完成
     init_db_and_reset_tasks()
+    
+    # 启动后台异步文件校验任务，实现毫秒级启动
+    Thread(target=async_verify_completed_downloads, daemon=True).start()
+    
     Thread(target=watch_clipboard, args=(bili,), daemon=True).start()
     Thread(target=cleanup_service.run_cleanup_scheduler, daemon=True).start()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭时清理资源"""
+    from .services.cover_cache_service import get_cover_cache_service
+    cover_service = get_cover_cache_service()
+    await cover_service.close()
+    logger.info("封面缓存服务已关闭")
 
 # 日志中间件
 @app.middleware("http")

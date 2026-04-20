@@ -9,3 +9,5 @@ pyperclip
 pillow
 yt-dlp
 python-multipart
+cachetools
+httpx

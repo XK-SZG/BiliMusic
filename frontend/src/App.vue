@@ -1,5 +1,6 @@
 <script setup>
 import { onMounted, ref, watch, onUnmounted, nextTick, computed, defineAsyncComponent } from 'vue'
+import { initSSE } from './api/system'
 import { useRoute, useRouter } from 'vue-router'
 import { usePlayerStore } from './stores/modules/player'
 import { useSettingsStore } from './stores/modules/settings'
@@ -8,6 +9,8 @@ import { useShortcuts } from './hooks/useShortcuts'
 import Sidebar from './components/Sidebar.vue'
 import PlayerBar from './components/PlayerBar.vue'
 import TitleBar from './components/TitleBar.vue'
+import AgreementModal from './components/AgreementModal.vue'
+import systemApi from './api/system'
 
 const isElectron = !!window.require
 const urlParams = new URLSearchParams(window.location.search)
@@ -21,8 +24,10 @@ const AudioVisualizer = defineAsyncComponent(() => import('./components/AudioVis
 const UniversalModal = defineAsyncComponent(() => import('./components/UniversalModal.vue'))
 const StickerLayer = defineAsyncComponent(() => import('./components/StickerLayer.vue'))
 const ParticleEngine = defineAsyncComponent(() => import('./components/ParticleEngine.vue'))
+const CollectionSelectModal = defineAsyncComponent(() => import('./components/CollectionSelectModal.vue'))
+const VideoPreviewModal = defineAsyncComponent(() => import('./components/VideoPreviewModal.vue'))
 
-import { SparklesIcon, ArrowRightOnRectangleIcon, UserIcon } from '@heroicons/vue/24/solid'
+import { SparklesIcon, ArrowRightOnRectangleIcon, UserIcon, MusicalNoteIcon, SpeakerWaveIcon, SpeakerXMarkIcon } from '@heroicons/vue/24/solid'
 import { ICON_ANNUAL_VIP } from './assets/icons'
 
 const store = usePlayerStore()
@@ -32,10 +37,17 @@ const route = useRoute()
 const router = useRouter()
 const videoRef = ref(null)
 
+const showAgreementModal = ref(false)
+
 // 启用全局快捷键
 useShortcuts()
 
 const showLogoutModal = ref(false)
+const clipboardBvid = ref(null)
+const clipboardVideo = ref(null)
+const showClipboardModal = ref(false)
+const showCollectionSelectModal = ref(false)
+let sseConnection = null
 
 // 沉浸全屏模式下的底部唤醒逻辑
 const isMouseIdleGlobal = ref(false)
@@ -124,7 +136,109 @@ async function syncVideoElement() {
   }
 }
 
+async function checkClipboardBvids() {
+  try {
+    const res = await systemApi.getPendingBvids()
+    if (res.videos && res.videos.length > 0 && !showClipboardModal.value) {
+      // 标记视频来源为剪贴板，以便后续处理
+      const videoInfo = { ...res.videos[0], from_clipboard: true }
+      clipboardVideo.value = videoInfo
+      clipboardBvid.value = videoInfo.bvid
+      showClipboardModal.value = true
+    }
+  } catch (e) {
+    // 静默失败，不影响主流程
+  }
+}
+
+async function handleClipboardConfirm(selectedVideoInfo) {
+  // 如果传入了选中的分集信息，更新 clipboardVideo 和 clipboardBvid
+  if (selectedVideoInfo) {
+    // 保留 from_clipboard 标记
+    clipboardVideo.value = { ...selectedVideoInfo, from_clipboard: true }
+    clipboardBvid.value = selectedVideoInfo.bvid
+    console.log('[剪贴板] 用户选择的分集信息:', {
+      bvid: selectedVideoInfo.bvid,
+      title: selectedVideoInfo.title,
+      duration: selectedVideoInfo.duration,
+      is_part: selectedVideoInfo.is_part,
+      part_num: selectedVideoInfo.part_num
+    })
+    console.log('[剪贴板] 更新后的 clipboardVideo:', clipboardVideo.value)
+    console.log('[剪贴板] 更新后的 clipboardBvid:', clipboardBvid.value)
+  }
+  
+  if (!clipboardBvid.value) return
+  
+  // 关闭剪贴板弹窗，打开媒体库选择弹窗
+  showClipboardModal.value = false
+  showCollectionSelectModal.value = true
+}
+
+async function handleCollectionSelect(collectionId) {
+  if (!clipboardVideo.value || !collectionId) return
+  
+  try {
+    // 调用确认接口，传入 collection_id 以及标题和时长（应对分集切换导致的值变化）
+    // 直接使用 clipboardVideo.value.bvid，而不是 clipboardBvid.value
+    await systemApi.confirmBvid(
+      clipboardVideo.value.bvid,
+      collectionId,
+      clipboardVideo.value.title,
+      clipboardVideo.value.duration
+    )
+    store.showToast(`视频已添加到媒体库`, 'success')
+    await store.fetchLocalVideos()
+  } catch (e) {
+    console.error('[剪贴板] 添加视频失败:', e)
+    store.showToast('添加视频失败', 'error')
+  } finally {
+    showCollectionSelectModal.value = false
+    cleanupClipboardModal()
+  }
+}
+
+function handleCollectionSelectClose() {
+  showCollectionSelectModal.value = false
+  // 不清理 clipboardBvid 和 clipboardVideo，以便用户可以重新打开选择
+}
+
+async function handleClipboardDismiss() {
+  if (!clipboardBvid.value) return
+  try {
+    await systemApi.dismissBvid(clipboardBvid.value)
+  } catch (e) {
+    // 静默失败
+  } finally {
+    cleanupClipboardModal()
+  }
+}
+
+function cleanupClipboardModal() {
+  showClipboardModal.value = false
+  clipboardBvid.value = null
+  clipboardVideo.value = null
+}
+
+function handleAgree() {
+  localStorage.setItem('user_agreed_20260416', 'true')
+  showAgreementModal.value = false
+}
+
+function handleDecline() {
+  if (window.require) {
+    const { ipcRenderer } = window.require('electron')
+    ipcRenderer.send('window-close')
+  } else {
+    window.close()
+  }
+}
+
 onMounted(async () => {
+  if (localStorage.getItem('user_agreed_20260416') !== 'true') {
+    showAgreementModal.value = true
+  }
+
   if (window.require) {
     const { ipcRenderer } = window.require('electron')
     ipcRenderer.on('window-maximized', () => {
@@ -162,11 +276,26 @@ onMounted(async () => {
   }
   syncVideoElement()
   window.addEventListener('mousemove', handleGlobalMouseMove)
+  
+  // 建立 SSE 长连接以替代轮询
+  sseConnection = initSSE(
+    (clipboardData) => {
+      // 当剪贴板有新数据时触发获取
+      if (clipboardData.count > 0 && !showClipboardModal.value) {
+        checkClipboardBvids()
+      }
+    },
+    (downloadState) => {
+      // 实时更新下载状态
+      store.updateDownloadStateFromSSE(downloadState)
+    }
+  )
 })
 
 onUnmounted(() => {
   window.removeEventListener('mousemove', handleGlobalMouseMove)
   if (mouseIdleTimer) clearTimeout(mouseIdleTimer)
+  if (sseConnection) sseConnection.close()
 })
 
 watch(() => store.currentVideo, () => { syncVideoElement() }, { deep: true })
@@ -295,13 +424,13 @@ watch(() => settingsStore.settings.videoFitMode, () => { syncVideoElement() })
                               hover:border-red-500/50 hover:bg-red-50/90 dark:hover:bg-red-500/20 hover:shadow-lg hover:shadow-red-500/20">
                   <div class="relative w-8 h-8 shrink-0">
                     <div class="w-full h-full rounded-full overflow-hidden border border-gray-200 dark:border-white/10 group-hover:border-red-500/40 transition-colors">
-                      <img :src="store.user.face" class="w-full h-full object-cover" v-if="store.user.face" />
+                      <img :src="store.user.face" @error="(e) => e.target.style.display='none'" draggable="false" class="w-full h-full object-cover" v-if="store.user.face" />
                       <UserIcon v-else class="w-full h-full p-1.5 text-gray-400" />
                     </div>
-                    <img v-if="store.user.vip_status === 1" :src="ICON_ANNUAL_VIP" class="absolute -bottom-1 -right-1 w-4 h-4 object-contain drop-shadow-md" />
+                    <img v-if="store.user.vip_status === 1" :src="ICON_ANNUAL_VIP" @error="(e) => e.target.style.display='none'" draggable="false" class="absolute -bottom-1 -right-1 w-4 h-4 object-contain drop-shadow-md" />
                   </div>
-                  <span class="hidden lg:block text-sm font-bold text-gray-700 dark:text-gray-200 group-hover:text-red-600 dark:group-hover:text-red-400 transition-colors ml-3">{{ store.user.uname }}</span>
-                  <div class="hidden lg:flex overflow-hidden transition-all duration-300 max-w-0 opacity-0 group-hover:max-w-[28px] group-hover:opacity-100 items-center">
+                  <span class="block text-sm font-bold text-gray-700 dark:text-gray-200 group-hover:text-red-600 dark:group-hover:text-red-400 transition-colors ml-3">{{ store.user.uname }}</span>
+                  <div class="flex overflow-hidden transition-all duration-300 max-w-0 opacity-0 group-hover:max-w-[28px] group-hover:opacity-100 items-center">
                     <ArrowRightOnRectangleIcon class="w-4 h-4 text-red-600 dark:text-red-400 ml-2 shrink-0" />
                   </div>
                </button>
@@ -321,7 +450,7 @@ watch(() => settingsStore.settings.videoFitMode, () => { syncVideoElement() })
             </template>
           </UniversalModal>
 
-          <main class="flex-1 overflow-y-auto p-6 pb-32 scrollbar-thin relative z-10">
+          <main class="flex-1 overflow-y-auto p-6 pb-28 scrollbar-thin relative z-10">
              <router-view v-slot="{ Component }">
                <transition :name="settingsStore.settings.uiTransition || 'fade'" mode="out-in">
                  <component :is="Component" />
@@ -372,13 +501,20 @@ watch(() => settingsStore.settings.videoFitMode, () => { syncVideoElement() })
     <AudioVisualizer />
 
     <!-- 真实的 Video 标签 -->
-    <video ref="videoRef" 
-           class="hidden" 
+    <video ref="videoRef"
+           class="hidden"
            preload="auto"
            crossorigin="anonymous"
            playsinline
            webkit-playsinline
            @ended="store.next()"></video>
+    
+    <!-- 预加载视频元素（用于剪贴板预览缓存） -->
+    <video ref="preloadVideoRef"
+           class="hidden"
+           preload="auto"
+           muted
+           crossorigin="anonymous"></video>
 
     <!-- 可视化编辑模式浮层 -->
     <transition name="toast-fade">
@@ -390,10 +526,25 @@ watch(() => settingsStore.settings.videoFitMode, () => { syncVideoElement() })
       </div>
     </transition>
 
+    <!-- 剪贴板 BV 号确认弹窗 (使用 VideoPreviewModal 组件) -->
+    <VideoPreviewModal
+      :show="showClipboardModal"
+      :video-info="clipboardVideo"
+      @close="handleClipboardDismiss"
+      @confirm="handleClipboardConfirm" />
+
+    <!-- 媒体库选择弹窗 -->
+    <CollectionSelectModal
+      :show="showCollectionSelectModal"
+      :video-info="clipboardVideo"
+      title="选择媒体库"
+      @close="handleCollectionSelectClose"
+      @confirm="handleCollectionSelect" />
+
     <!-- Toast 提示 -->
     <transition name="toast-fade">
-      <div v-if="store.toast.show" 
-           class="fixed top-10 left-1/2 -translate-x-1/2 z-[200] px-6 py-3 rounded-2xl shadow-2xl backdrop-blur-md border flex items-center gap-3 transition-all duration-300"
+      <div v-if="store.toast.show"
+           class="fixed top-10 left-1/2 -translate-x-1/2 z-[9999] px-6 py-3 rounded-2xl shadow-2xl backdrop-blur-md border flex items-center gap-3 transition-all duration-300"
            :class="{
              'bg-white/90 dark:bg-gray-900/90 border-gray-200 dark:border-white/10 text-gray-800 dark:text-white': store.toast.type === 'info',
              'bg-red-500/90 border-red-600 text-white': store.toast.type === 'error',
@@ -405,12 +556,32 @@ watch(() => settingsStore.settings.videoFitMode, () => { syncVideoElement() })
       </div>
     </transition>
 
+    <!-- 用户协议弹窗 -->
+    <AgreementModal :show="showAgreementModal" @agree="handleAgree" @decline="handleDecline" />
+
     <!-- 窗口标题栏 (置于最顶层) -->
     <TitleBar v-if="showTitleBar" class="z-[9999]" />
   </div>
 </template>
 
 <style>
+/* 全局图像优化 - 修复锯齿问题 (还原 1.0.14 版本的修复) */
+img {
+  /* CSS 抗锯齿属性 */
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
+  
+  /* GPU 加速 */
+  transform: translateZ(0);
+  will-change: transform;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  
+  /* 平滑渲染 */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
 .scrollbar-thin::-webkit-scrollbar { width: 6px; }
 .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
 .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 3px; }

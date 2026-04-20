@@ -1,7 +1,7 @@
 {
   "name": "bili-music",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.17",
   "description": "BiliMusic - A Bilibili Music Player",
   "author": "XK",
   "main": "main.cjs",
@@ -17,6 +17,8 @@
     "@heroicons/vue": "^2.2.0",
     "axios": "^1.6.7",
     "dexie": "^4.3.0",
+    "echarts": "^5.6.0",
+    "lodash-es": "^4.17.21",
     "pinia": "^2.1.7",
     "tree-kill": "^1.2.2",
     "vue": "^3.4.15",

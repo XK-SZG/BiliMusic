@@ -1,10 +1,15 @@
 <!-- frontend/src/views/LocalLibrary.vue -->
 <script setup>
-import { ref, onMounted, computed, reactive, onUnmounted, watch } from 'vue'
+import { ref, onMounted, computed, reactive, onUnmounted, watch, nextTick } from 'vue'
 import { usePlayerStore } from '../stores/modules/player'
 import UniversalModal from '../components/UniversalModal.vue'
+import ContextMenu from '../components/ContextMenu.vue'
 import TrimEditor from '../components/TrimEditor.vue'
+import AddVideoInputModal from '../components/AddVideoInputModal.vue'
+import VideoPreviewModal from '../components/VideoPreviewModal.vue'
+import CollectionSelectModal from '../components/CollectionSelectModal.vue'
 import localApi from '../api/local'
+import biliApi from '../api/bili'
 import {
   PlayIcon,
   CheckCircleIcon,
@@ -29,7 +34,9 @@ import {
   VideoCameraIcon as VideoIcon,
   ServerIcon,
   PencilSquareIcon,
-  Bars3Icon
+  Bars3Icon,
+  CloudArrowDownIcon,
+  LinkIcon
 } from '@heroicons/vue/24/solid'
 import { FolderIcon as FolderOutline } from '@heroicons/vue/24/outline'
 
@@ -68,10 +75,175 @@ const modalState = reactive({
 const isManageOpen = ref(false)
 const showTrimEditor = ref(false)
 const trimTargetBvid = ref('')
+const showAddVideoInput = ref(false)
+const showAddVideoPreview = ref(false)
+const showAddVideoCollectionSelect = ref(false)
+const addVideoData = ref(null)
 
 function openTrimEditor(bvid) {
   trimTargetBvid.value = bvid
   showTrimEditor.value = true
+}
+
+async function handleAddVideoInput(inputText) {
+  // 关闭输入弹窗
+  showAddVideoInput.value = false
+  
+  // 解析 BV 号
+  const bvRegex = /BV[a-zA-Z0-9]{10}/
+  const pParamRegex = /[?&]p=(\d+)/
+  
+  const bvMatch = bvRegex.exec(inputText)
+  if (!bvMatch) {
+    store.showToast('未找到有效的 BV 号', 'error')
+    return
+  }
+
+  // 手动添加时，如果剪贴板轮询正在进行，可能和剪贴板添加冲突
+  // 所以我们可以清空或忽略当前已缓存的 bvid，不过主要还是调用自己的逻辑
+  
+  const bvid = bvMatch[0]
+  const pMatch = pParamRegex.exec(inputText)
+  const partNum = pMatch ? pMatch[1] : null
+  
+  // 构造标准化的 bvid
+  const normalizedBvid = partNum ? `${bvid}_p${partNum}` : bvid
+  
+  try {
+    const cleanBvid = bvid
+    const parts = await biliApi.getVideoParts(cleanBvid)
+    
+    // 注意：如果是单P视频，parts.parts 可能为空或者只有 1 个
+    // 经过后端优化后，parts 会包含 title, pic, owner, duration
+    
+    if (!parts || (!parts.parts && !parts.title)) {
+      store.showToast('无法获取视频信息', 'error')
+      return
+    }
+    
+    // 如果是分集视频，获取对应分集的信息
+    let finalVideoInfo = null;
+    
+    // 获取UP主头像
+    let ownerFace = '';
+    if (parts.owner_face) {
+      ownerFace = parts.owner_face;
+    } else {
+      // 尝试通过普通API获取UP主头像
+      try {
+          const url = `https://api.bilibili.com/x/web-interface/view?bvid=${cleanBvid}`;
+          const res = await fetch(url).then(r => r.json());
+          if (res.code === 0 && res.data && res.data.owner && res.data.owner.face) {
+              ownerFace = res.data.owner.face;
+          }
+      } catch(err){}
+    }
+
+    if (partNum) {
+      const pNum = parseInt(partNum)
+      if (parts.parts && parts.parts.length > 0 && pNum > parts.parts.length) {
+        store.showToast(`分集编号超出范围（共 ${parts.parts.length} 集）`, 'error')
+        return
+      }
+      
+      const partInfo = parts.parts && parts.parts.length > 0 ? parts.parts[pNum - 1] : null
+      
+      finalVideoInfo = {
+        bvid: normalizedBvid,
+        title: partInfo ? `${parts.title} - P${pNum}: ${partInfo.part}` : `${parts.title} - P${pNum}`,
+        owner: parts.owner,
+        owner_face: ownerFace,
+        pic: parts.pic,
+        duration: partInfo ? partInfo.duration : parts.duration,
+        is_part: true,
+        part_num: pNum,
+        clean_bvid: cleanBvid
+      }
+    } else {
+      finalVideoInfo = {
+        bvid: normalizedBvid,
+        title: parts.title,
+        owner: parts.owner,
+        owner_face: ownerFace,
+        pic: parts.pic,
+        duration: parts.duration,
+        is_part: false,
+        part_num: null,
+        clean_bvid: cleanBvid
+      }
+    }
+    
+    // 保存视频信息并显示预览弹窗
+    addVideoData.value = finalVideoInfo
+    showAddVideoPreview.value = true
+  } catch (e) {
+    console.error('获取视频信息失败:', e)
+    store.showToast('获取视频信息失败', 'error')
+  }
+}
+
+async function handleAddVideoCollectionSelect(collectionId) {
+  if (!addVideoData.value || !collectionId) return
+  
+  try {
+    // 由于后端 importBiliVideos 不能保存 owner_face 和高维元数据，我们可以利用 confirmBvid 或者
+    // 直接走 importBiliVideos。其实 importBiliVideos 可以自动下载默认状态的视频信息
+    // 为了防止 422, duration 必须强转为 int
+    
+    if (addVideoData.value.from_clipboard) {
+        try {
+            await systemApi.confirmBvid(
+                addVideoData.value.bvid,
+                collectionId,
+                addVideoData.value.title,
+                addVideoData.value.duration
+            );
+        } catch(err){}
+    } else {
+        await localApi.importBiliVideos(collectionId, [{
+          bvid: addVideoData.value.bvid,
+          title: addVideoData.value.title,
+          owner: addVideoData.value.owner,
+          pic: addVideoData.value.pic, // 使用原始B站图片URL，后端会自动代理
+          duration: parseInt(addVideoData.value.duration) || 0  // 确保是整数
+        }])
+    }
+    
+    // 为了防止剪贴板立即又把它抓出来，手动通知后端忽略这个BV号
+    try {
+        await systemApi.dismissBvid(addVideoData.value.bvid);
+    } catch(err){}
+    
+    store.showToast('视频已添加到媒体库', 'success')
+    await store.fetchLocalVideos()
+    await store.fetchLocalCollections()
+  } catch (e) {
+    console.error('添加视频失败:', e)
+    store.showToast('添加视频失败', 'error')
+  } finally {
+    showAddVideoCollectionSelect.value = false
+    addVideoData.value = null
+  }
+}
+
+function handleVideoPreviewConfirm(selectedVideoInfo) {
+  // 更新 addVideoData 为用户选中的分集信息（如果有）
+  if (selectedVideoInfo) {
+    addVideoData.value = selectedVideoInfo
+  }
+  // 关闭预览弹窗，打开媒体库选择弹窗
+  showAddVideoPreview.value = false
+  showAddVideoCollectionSelect.value = true
+}
+
+function handleVideoPreviewClose() {
+  showAddVideoPreview.value = false
+  addVideoData.value = null
+}
+
+function handleAddVideoCollectionSelectClose() {
+  showAddVideoCollectionSelect.value = false
+  // 不清理 addVideoData，以便用户可以重新打开选择
 }
 
 function openEditMetadata() {
@@ -198,16 +370,19 @@ const isAllCached = computed(() => {
 
 // --- 业务逻辑 ---
 function handleCardClick(event, bvid, index) {
+  // 阻止默认行为以防选择文本
+  if (event.shiftKey) event.preventDefault()
+
   if (event.shiftKey && lastSelectedIndex.value !== -1) {
     const start = Math.min(lastSelectedIndex.value, index)
     const end = Math.max(lastSelectedIndex.value, index)
     const rangeBvids = filteredVideos.value.slice(start, end + 1).map(v => v.bvid)
-    const isStartSelected = store.selectedBvids.includes(filteredVideos.value[lastSelectedIndex.value].bvid)
-    if (isStartSelected) {
-      store.selectedBvids = store.selectedBvids.filter(id => !rangeBvids.includes(id))
+    
+    const isAdding = !store.selectedBvids.includes(bvid)
+    if (isAdding) {
+      store.selectedBvids = Array.from(new Set([...store.selectedBvids, ...rangeBvids]))
     } else {
-      const newSelection = new Set([...store.selectedBvids, ...rangeBvids])
-      store.selectedBvids = Array.from(newSelection)
+      store.selectedBvids = store.selectedBvids.filter(id => !rangeBvids.includes(id))
     }
   } else {
     const idx = store.selectedBvids.indexOf(bvid)
@@ -241,13 +416,14 @@ function handlePlay(video) {
     openModal('confirm', '正在播放网络流', null, {
       message: '视频未缓存，是否在播放时自动加入下载队列？',
       confirmText: '缓存并播放',
-      cancelText: '仅播放'
+      cancelText: '仅播放',
+      requireConfirm: true
     }, (confirmed) => {
-      // 通过 store 调用 action，确保作用域正确
-      store.playVideo(video, confirmed)
+      if (confirmed !== null) {
+        store.playVideo(video, confirmed === true)
+      }
     })
   } else {
-    // 关键修正：确保在已缓存路径下也正确调用 action
     store.playVideo(video)
   }
 }
@@ -259,9 +435,12 @@ function playAllFiltered() {
     openModal('confirm', '正在播放网络流', null, {
       message: '列表包含未缓存视频，是否在播放时批量加入下载队列？',
       confirmText: '缓存并播放',
-      cancelText: '仅播放'
+      cancelText: '仅播放',
+      requireConfirm: true
     }, (confirmed) => {
-      store.playList(filteredVideos.value, 0, confirmed)
+      if (confirmed !== null) {
+        store.playList(filteredVideos.value, 0, confirmed === true)
+      }
     })
   } else {
     store.playList(filteredVideos.value)
@@ -276,10 +455,13 @@ function handleBatchPlay() {
        openModal('confirm', '正在播放网络流', null, {
          message: '选中视频包含未缓存项，是否在播放时同步缓存？',
          confirmText: '缓存并播放',
-         cancelText: '仅播放'
+         cancelText: '仅播放',
+         requireConfirm: true
        }, (confirmed) => {
-         store.playList(selected, 0, confirmed)
-         store.selectedBvids = []
+         if (confirmed !== null) {
+           store.playList(selected, 0, confirmed === true)
+           store.selectedBvids = []
+         }
        })
     } else {
       store.playList(selected)
@@ -293,9 +475,12 @@ function handleAddToQueue(video) {
     openModal('confirm', '加入播放队列', null, {
       message: '视频未缓存，是否在加入队列时同步下载？',
       confirmText: '缓存并加入',
-      cancelText: '仅加入'
+      cancelText: '仅加入',
+      requireConfirm: true
     }, (confirmed) => {
-      store.addToQueue(video, confirmed)
+      if (confirmed !== null) {
+        store.addToQueue(video, confirmed === true)
+      }
     })
   } else {
     store.addToQueue(video)
@@ -310,10 +495,13 @@ function handleBatchQueue() {
        openModal('confirm', '加入播放队列', null, {
          message: '选中视频包含未缓存项，是否在加入队列时同步缓存？',
          confirmText: '缓存并加入',
-         cancelText: '仅加入'
+         cancelText: '仅加入',
+         requireConfirm: true
        }, (confirmed) => {
-         store.addToQueueList(selected, confirmed)
-         store.selectedBvids = []
+         if (confirmed !== null) {
+           store.addToQueueList(selected, confirmed === true)
+           store.selectedBvids = []
+         }
        })
     } else {
       store.addToQueueList(selected)
@@ -344,6 +532,19 @@ async function deleteCollection(id) {
         store.fetchLocalVideos()
       })
     }
+  })
+}
+
+function openRenameCollection(id, oldName) {
+  openModal('input', '重命名媒体夹', oldName, {}, async (name) => {
+    if (!name || name === oldName) return
+    const exists = store.localCollections.some(c => c.title === name)
+    if (exists) {
+      store.showToast("媒体夹名称已存在", "error")
+      return
+    }
+    await localApi.renameCollection(id, name)
+    await store.fetchLocalCollections()
   })
 }
 
@@ -420,12 +621,14 @@ async function handleBatchMove(targetColId) {
 
 async function handleBatchRemoveLink() {
   if (!store.activeCollectionId) return
-  openModal('confirm', '从当前媒体夹移除选中视频？', null, {}, async () => {
-    for (const bvid of store.selectedBvids) {
-      await localApi.removeVideoFromCollection(store.activeCollectionId, bvid)
+  openModal('confirm', '从当前媒体夹移除选中视频？', null, {}, async (confirmed) => {
+    if (confirmed) {
+      for (const bvid of store.selectedBvids) {
+        await localApi.removeVideoFromCollection(store.activeCollectionId, bvid)
+      }
+      await store.fetchLocalVideos()
+      store.selectedBvids = []
     }
-    await store.fetchLocalVideos()
-    store.selectedBvids = []
   })
 }
 
@@ -433,9 +636,11 @@ async function handleBatchDelete() {
   const msg = store.activeCollectionId
     ? '危险：这将从所有媒体夹及硬盘中彻底删除文件！'
     : '确定要彻底删除选中的视频及物理文件吗？'
-  openModal('confirm', msg, null, { isDanger: true }, async () => {
-    await store.batchDelete()
-    store.selectedBvids = []
+  openModal('confirm', msg, null, { isDanger: true }, async (confirmed) => {
+    if (confirmed) {
+      await store.batchDelete()
+      store.selectedBvids = []
+    }
   })
 }
 
@@ -495,6 +700,7 @@ const dragOverColId = ref(null)
 let dragStartColId = null
 
 const dragOverBvid = ref(null)
+const dragInsertPosition = ref(null) // 'before' | 'after'
 let dragStartBvid = null
 
 function onColDragStart(event, colId) {
@@ -541,22 +747,48 @@ function onVideoDragStart(event, bvid) {
   }
 }
 
-function onVideoDragOver(event, bvid) {
+function onVideoDragOver(event, bvid, index) {
   event.preventDefault()
   if (bvid === dragStartBvid) return
+  
+  // 防御检查：如果目标在选中集合内，不显示插入线
+  if (store.selectedBvids.includes(bvid)) {
+    dragOverBvid.value = null
+    dragInsertPosition.value = null
+    return
+  }
+  
+  // 计算鼠标相对于卡片的位置，判断插入到左边还是右边
+  const card = event.currentTarget
+  const rect = card.getBoundingClientRect()
+  const mouseX = event.clientX
+  const cardMiddle = rect.left + rect.width / 2
+  
   dragOverBvid.value = bvid
+  // 如果鼠标在卡片左半部分，分隔线显示在该卡片左侧（before）
+  // 如果鼠标在卡片右半部分，分隔线显示在该卡片右侧（after）
+  dragInsertPosition.value = mouseX < cardMiddle ? 'before' : 'after'
 }
 
-function onVideoDrop(event, targetBvid) {
+function onVideoDrop(event, targetBvid, index) {
   event.preventDefault()
   const sourceBvid = dragStartBvid
   const targetIdFinal = targetBvid
+  const insertPos = dragInsertPosition.value
+  
   dragOverBvid.value = null
+  dragInsertPosition.value = null
   dragStartBvid = null
 
   if (!sourceBvid || sourceBvid === targetIdFinal) return
 
-  // 这里的逻辑是实现“插入”：将所有选中的视频移动到目标位置
+  // 防御检查：如果放置目标处于当前选中的多选集合内，则视为原地无效拖放，避免数组塌陷
+  if (store.selectedBvids.includes(targetIdFinal)) {
+    console.warn('拖拽目标位于选中集合内，忽略此次拖放操作')
+    return
+  }
+
+  // 这里的逻辑是实现"插入"：将所有选中的视频移动到目标位置
   const newVideos = [...store.localVideos]
   
   // 1. 获取选中的所有视频对象
@@ -568,19 +800,215 @@ function onVideoDrop(event, targetBvid) {
   // 3. 找到目标位置
   let targetIdx = resultVideos.findIndex(v => v.bvid === targetIdFinal)
   
-  // 4. 判定是插入到目标之前还是之后（简化处理：统一插入到目标之前）
+  // 4. 根据插入位置（before/after）调整索引
   if (targetIdx !== -1) {
+    if (insertPos === 'after') {
+      targetIdx += 1
+    }
     resultVideos.splice(targetIdx, 0, ...movingVideos)
+  } else {
+    // 如果没有找到目标位置（理论上不会走到这里，加一层兜底），则追加到末尾
+    console.warn('未找到拖拽目标位置，将选中项追加到末尾')
+    resultVideos.push(...movingVideos)
   }
   
   store.localVideos = resultVideos
   // 向后端同步排序
   localApi.reorderVideos(resultVideos.map(v => v.bvid))
 }
+
+// 处理拖拽到空白区域（最末尾）
+function onGridDragOver(event) {
+  event.preventDefault()
+  // 如果不在任何卡片上，设置为在最后一个视频之后插入
+  if (!dragOverBvid.value && filteredVideos.value.length > 0) {
+    const lastVideo = filteredVideos.value[filteredVideos.value.length - 1]
+    dragOverBvid.value = lastVideo.bvid
+    dragInsertPosition.value = 'after'
+  }
+}
+
+function onGridDrop(event) {
+  event.preventDefault()
+  if (dragOverBvid.value && filteredVideos.value.length > 0) {
+    const lastVideo = filteredVideos.value[filteredVideos.value.length - 1]
+    onVideoDrop(event, lastVideo.bvid, filteredVideos.value.length - 1)
+  }
+}
+
+// 计算拖拽分隔线的位置（竖向分隔线）
+function getDropLineStyle() {
+  if (!dragOverBvid.value) return {}
+  
+  // 查找目标卡片的 DOM 元素
+  const targetCard = document.querySelector(`[data-video-bvid="${dragOverBvid.value}"]`)
+  if (!targetCard) return {}
+  
+  const rect = targetCard.getBoundingClientRect()
+  
+  let top, left, height
+  
+  if (dragInsertPosition.value === 'before') {
+    // 鼠标在卡片左半部分，分隔线显示在该卡片左侧
+    // gap-4 = 16px (1rem), 分隔线居中在间隙中 = -12px
+    left = rect.left - 12
+  } else {
+    // 鼠标在卡片右半部分，分隔线显示在该卡片右侧
+    // gap-4 = 16px (1rem), 分隔线居中在间隙中 = +12px
+    left = rect.right + 12
+  }
+  
+  top = rect.top
+  height = rect.height
+  
+  return {
+    top: `${top}px`,
+    left: `${left}px`,
+    height: `${height}px`,
+    width: '4px'
+  }
+}
+
+// 右键菜单状态
+const contextMenu = reactive({
+  visible: false,
+  x: 0,
+  y: 0,
+  video: null
+})
+
+// 显示右键菜单
+function showContextMenu(event, video) {
+  event.preventDefault()
+  event.stopPropagation()
+  contextMenu.video = video
+  contextMenu.x = event.clientX
+  contextMenu.y = event.clientY
+  contextMenu.visible = true
+}
+
+// 右键菜单项
+const contextMenuItems = computed(() => {
+  if (!contextMenu.video) return []
+  
+  const video = contextMenu.video
+  const isCached = video.download_status === 'completed'
+  const isLocal = video.is_local === 1
+  
+  const items = [
+    {
+      label: '播放',
+      icon: PlayIcon,
+      action: () => handlePlay(video)
+    },
+    {
+      label: '添加到播放队列',
+      icon: QueueListIcon,
+      action: () => handleAddToQueue(video)
+    },
+    {
+      type: 'divider'
+    },
+    {
+      label: '编辑裁剪区间',
+      icon: ScissorsIcon,
+      action: () => openTrimEditor(video.bvid)
+    },
+    {
+      label: '编辑媒体信息',
+      icon: PencilSquareIcon,
+      action: () => {
+        store.selectedBvids = [video.bvid]
+        openEditMetadata()
+      }
+    },
+    {
+      label: '管理标签',
+      icon: TagIcon,
+      action: () => {
+        store.selectedBvids = [video.bvid]
+        openTagModal()
+      }
+    },
+    {
+      label: '评分',
+      icon: StarIcon,
+      action: () => {
+        store.selectedBvids = [video.bvid]
+        openScoreModal()
+      }
+    }
+  ]
+  
+  if (!isLocal) {
+    items.push(
+      {
+        type: 'divider'
+      },
+      {
+        label: isCached ? '已缓存' : '下载缓存',
+        icon: CloudArrowDownIcon,
+        disabled: isCached,
+        action: () => !isCached && store.addToDownload(video.bvid)
+      },
+      {
+        label: '在B站打开',
+        icon: LinkIcon,
+        action: () => openBiliVideo(video.bvid)
+      }
+    )
+  }
+  
+  items.push(
+    {
+      type: 'divider'
+    },
+    {
+      label: '从当前媒体库移除',
+      icon: XCircleIcon,
+      disabled: !store.activeCollectionId,
+      action: () => {
+        if (store.activeCollectionId) {
+          store.selectedBvids = [video.bvid]
+          handleBatchRemoveLink()
+        }
+      }
+    },
+    {
+      label: '彻底删除',
+      icon: TrashIcon,
+      danger: true,
+      action: () => {
+        store.selectedBvids = [video.bvid]
+        handleBatchDelete()
+      }
+    }
+  )
+  
+  return items
+})
+
+// 处理右键菜单选择
+function handleContextMenuSelect(item) {
+  if (item.action) {
+    item.action()
+  }
+  contextMenu.visible = false
+}
 </script>
 
 <template>
   <div class="flex flex-col h-full animate-fade-in relative">
+    <!-- 右键菜单 -->
+    <ContextMenu
+      :visible="contextMenu.visible"
+      :x="contextMenu.x"
+      :y="contextMenu.y"
+      :items="contextMenuItems"
+      @close="contextMenu.visible = false"
+      @select="handleContextMenuSelect"
+    />
+    
     <!-- 全局进度条 -->
     <transition name="slide-down">
       <div v-if="store.activeDownloadCount > 0"
@@ -595,6 +1023,9 @@ function onVideoDrop(event, targetBvid) {
             <div class="h-full bg-white transition-all duration-500" :style="{width: store.globalDownloadProgress + '%'}"></div>
           </div>
         </div>
+        <button @click="store.cancelAllDownloads()" class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-xs font-black rounded-xl transition-all active:scale-95 shadow-lg whitespace-nowrap">
+          取消全部
+        </button>
       </div>
     </transition>
 
@@ -609,11 +1040,14 @@ function onVideoDrop(event, targetBvid) {
         </div>
         
         <!-- 新增：本地媒体导入按钮 -->
-        <div class="px-4 lg:px-6 py-4 bg-gray-50 dark:bg-white/5 border-b border-gray-100 dark:border-white/5">
+        <div class="px-4 lg:px-6 py-4 bg-gray-50 dark:bg-white/5 border-b border-gray-100 dark:border-white/5 space-y-2">
           <label class="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-gray-900 dark:bg-white text-white dark:text-black rounded-2xl text-[10px] font-black cursor-pointer hover:scale-[1.02] transition-transform shadow-md">
             <ArrowUpTrayIcon class="w-4 h-4" /> 导入本地资源
             <input type="file" class="hidden" accept="video/*,audio/*" multiple @change="handleLocalImport" />
           </label>
+          <button @click="showAddVideoInput = true" class="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-primary-500 text-white rounded-2xl text-[10px] font-black hover:scale-[1.02] transition-transform shadow-md">
+            <PlusIcon class="w-4 h-4" /> 添加 B 站视频
+          </button>
         </div>
 
         <div class="flex-1 overflow-y-auto p-2 lg:p-4 space-y-1 scrollbar-none">
@@ -623,7 +1057,7 @@ function onVideoDrop(event, targetBvid) {
             <QueueListIcon class="w-5 h-5 shrink-0" /> 全部视频
           </button>
 
-          <div v-for="col in store.localCollections" :key="col.id" 
+          <div v-for="col in store.localCollections" :key="col.id"
                class="group relative flex items-center"
                draggable="true"
                @dragstart="onColDragStart($event, col.id)"
@@ -632,12 +1066,13 @@ function onVideoDrop(event, targetBvid) {
                @dragend="dragOverColId = null">
             
             <!-- 拖拽提示条 -->
-            <div v-if="dragOverColId === col.id" 
+            <div v-if="dragOverColId === col.id"
                  class="absolute left-0 right-0 h-1 bg-primary-500 z-50 rounded-full shadow-[0_0_10px_rgba(236,72,153,0.5)] animate-pulse"
                  :class="store.localCollections.findIndex(c => c.id === dragStartColId) < store.localCollections.findIndex(c => c.id === col.id) ? '-bottom-0.5' : '-top-0.5'">
             </div>
 
             <button @click="store.activeCollectionId = col.id"
+                    @contextmenu.prevent="col.type !== 'virtual' ? openRenameCollection(col.id, col.title) : null"
                     :class="store.activeCollectionId === col.id ? 'bg-primary-500 text-white shadow-xl shadow-primary-500/20' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/5'"
                     class="flex-1 text-left px-3 lg:px-5 py-3 lg:py-4 rounded-2xl text-xs lg:text-sm font-bold truncate transition-all flex items-center gap-2 lg:gap-3 pr-8 lg:pr-10">
               <div class="opacity-0 group-hover:opacity-40 transition-opacity shrink-0">
@@ -648,10 +1083,16 @@ function onVideoDrop(event, targetBvid) {
               <ServerIcon v-if="col.type === 'virtual'" class="w-5 h-5 shrink-0" />
               <span class="truncate">{{ col.title }}</span>
             </button>
-            <button v-if="col.type !== 'virtual'" @click.stop="deleteCollection(col.id)"
-                    class="absolute right-2 lg:right-3 opacity-0 group-hover:opacity-100 p-1 lg:p-2 text-gray-400 hover:text-red-500 transition">
-              <TrashIcon class="w-4 h-4" />
-            </button>
+            <div class="absolute right-2 lg:right-3 opacity-0 group-hover:opacity-100 flex items-center gap-1 transition">
+              <button v-if="col.type !== 'virtual'" @click.stop="openRenameCollection(col.id, col.title)"
+                      class="p-1 text-gray-400 hover:text-blue-500 transition">
+                <PencilSquareIcon class="w-4 h-4" />
+              </button>
+              <button v-if="col.type !== 'virtual'" @click.stop="deleteCollection(col.id)"
+                      class="p-1 text-gray-400 hover:text-red-500 transition">
+                <TrashIcon class="w-4 h-4" />
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -683,8 +1124,18 @@ function onVideoDrop(event, targetBvid) {
                 <button v-for="opt in searchOptions" :key="opt.val"
                         @click="searchMode = opt.val"
                         :class="searchMode === opt.val ? 'bg-white dark:bg-gray-700 text-primary-500 shadow-sm' : 'text-gray-400 hover:text-gray-600'"
-                        class="px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all uppercase whitespace-nowrap">
+                        class="px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all uppercase whitespace-nowrap relative group/tooltip"
+                        :title="opt.val === 'regex' ? '支持JavaScript正则表达式语法，如 ^开头$ 结尾 .任意字符 .*任意内容 [abc]字符集 (a|b)或' : ''">
                   {{ opt.label }}
+                  <div v-if="opt.val === 'regex'" class="absolute top-full left-1/2 -translate-x-1/2 mt-2 px-3 py-2 bg-gray-900 dark:bg-gray-800 text-white text-[10px] rounded-xl shadow-2xl border border-white/10 opacity-0 group-hover/tooltip:opacity-100 pointer-events-none transition-opacity duration-200 whitespace-nowrap z-50">
+                    <div class="absolute bottom-full left-1/2 -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-b-4 border-transparent border-b-gray-900 dark:border-b-gray-800"></div>
+                    <div class="font-black mb-1 text-primary-400">正则表达式帮助</div>
+                    <div class="space-y-0.5 text-left">
+                      <div><span class="text-yellow-400">^</span> 匹配开头 | <span class="text-yellow-400">$</span> 匹配结尾</div>
+                      <div><span class="text-yellow-400">.</span> 任意字符 | <span class="text-yellow-400">.*</span> 任意内容</div>
+                      <div><span class="text-yellow-400">[abc]</span> 字符集 | <span class="text-yellow-400">(a|b)</span> 或</div>
+                    </div>
+                  </div>
                 </button>
               </div>
               <div v-else class="relative group z-50 shrink-0">
@@ -711,52 +1162,52 @@ function onVideoDrop(event, targetBvid) {
           </template>
 
           <template v-else>
-            <div class="flex-1 flex flex-wrap items-center gap-2 animate-fade-in ml-2">
+            <div class="flex-1 flex flex-wrap items-center gap-2 animate-fade-in ml-2 py-1">
                <span class="px-3 py-1.5 bg-primary-500 text-white rounded-xl text-[10px] font-black shadow-lg shadow-primary-500/20 whitespace-nowrap">已选 {{ selectionCount }}</span>
                
                <button @click="handleBatchPlay" class="btn-batch text-primary-600 bg-primary-50 hover:bg-primary-100 dark:bg-primary-500/10 dark:text-primary-400" title="播放">
-                 <PlayIcon class="w-4 h-4" /> <span v-if="windowWidth >= 1200">播放</span>
+                 <PlayIcon class="w-4 h-4 shrink-0" /> <span>播放</span>
                </button>
 
                <button @click="handleBatchQueue" class="btn-batch text-purple-600 bg-purple-50 hover:bg-purple-100 dark:bg-purple-500/10 dark:text-purple-400" title="队列">
-                 <PlusIcon class="w-4 h-4" /> <span v-if="windowWidth >= 1200">队列</span>
+                 <PlusIcon class="w-4 h-4 shrink-0" /> <span>队列</span>
                </button>
                
                <button @click="handleBatchCache" :disabled="isAllCached" class="btn-batch text-blue-600 bg-blue-50 hover:bg-blue-100 dark:bg-blue-500/10 dark:text-blue-400 disabled:opacity-30" title="缓存">
-                 <ArrowDownTrayIcon class="w-4 h-4" /> <span v-if="windowWidth >= 1200">{{ isAllCached ? '已缓存' : '缓存' }}</span>
+                 <ArrowDownTrayIcon class="w-4 h-4 shrink-0" /> <span>{{ isAllCached ? '已缓存' : '缓存' }}</span>
                </button>
                
                <button @click="openScoreModal" class="btn-batch text-yellow-600 bg-yellow-50 hover:bg-yellow-100 dark:bg-yellow-500/10 dark:text-yellow-400" title="评分">
-                 <StarIcon class="w-4 h-4" /> <span v-if="windowWidth >= 1200">评分</span>
+                 <StarIcon class="w-4 h-4 shrink-0" /> <span>评分</span>
                </button>
                
                <button @click="openTagModal" class="btn-batch text-purple-600 bg-purple-50 hover:bg-purple-100 dark:bg-purple-500/10 dark:text-purple-400" title="标签">
-                 <TagIcon class="w-4 h-4" /> <span v-if="windowWidth >= 1200">标签</span>
+                 <TagIcon class="w-4 h-4 shrink-0" /> <span>标签</span>
                </button>
                
                <button v-if="selectionCount === 1" @click="openTrimEditor(store.selectedBvids[0])" class="btn-batch text-teal-600 bg-teal-50 hover:bg-teal-100 dark:bg-teal-500/10 dark:text-teal-400" title="裁剪">
-                 <ScissorsIcon class="w-4 h-4" /> <span v-if="windowWidth >= 1200">裁剪</span>
+                 <ScissorsIcon class="w-4 h-4 shrink-0" /> <span>裁剪</span>
                </button>
                
                <button v-if="selectionCount === 1" @click="openEditMetadata" class="btn-batch text-cyan-600 bg-cyan-50 hover:bg-cyan-100 dark:bg-cyan-500/10 dark:text-cyan-400" title="编辑信息">
-                 <PencilSquareIcon class="w-4 h-4" /> <span v-if="windowWidth >= 1200">信息</span>
+                 <PencilSquareIcon class="w-4 h-4 shrink-0" /> <span>信息</span>
                </button>
 
                <!-- 管理按钮 -->
                <div class="relative">
                  <div v-if="isManageOpen" @click="isManageOpen = false" class="fixed inset-0 z-40"></div>
-                 <button @click.stop="isManageOpen = !isManageOpen" 
+                 <button @click.stop="isManageOpen = !isManageOpen"
                          class="btn-batch text-gray-700 bg-gray-200 hover:bg-gray-300 dark:bg-white/20 dark:text-white relative z-50" title="管理">
-                   <DocumentDuplicateIcon class="w-4 h-4" /> <span v-if="windowWidth >= 1200">管理</span>
+                   <DocumentDuplicateIcon class="w-4 h-4 shrink-0" /> <span>管理</span>
                  </button>
                  
                  <transition name="fade">
-                   <div v-if="isManageOpen" 
+                   <div v-if="isManageOpen"
                         class="absolute top-full left-0 mt-2 w-48 bg-white dark:bg-gray-900 rounded-[1.5rem] shadow-2xl border border-gray-100 dark:border-white/10 z-50 p-2 overflow-hidden">
                      <div class="px-3 py-2 text-[8px] font-black text-gray-400 uppercase tracking-widest border-b border-gray-100 dark:border-white/5 mb-1">复制到</div>
                      <div class="max-h-32 overflow-y-auto scrollbar-none">
-                       <button v-for="c in store.localCollections" :key="'cp'+c.id" 
-                               @click="handleBatchCopy(c.id); isManageOpen = false" 
+                       <button v-for="c in store.localCollections" :key="'cp'+c.id"
+                               @click="handleBatchCopy(c.id); isManageOpen = false"
                                :disabled="store.activeCollectionId === c.id"
                                :class="store.activeCollectionId === c.id ? 'opacity-30 cursor-not-allowed' : 'hover:bg-primary-50 dark:hover:bg-white/5'"
                                class="w-full text-left px-4 py-2 text-xs rounded-xl font-bold flex items-center gap-2 transition-colors">
@@ -765,8 +1216,8 @@ function onVideoDrop(event, targetBvid) {
                      </div>
                      <div class="px-3 py-2 text-[8px] font-black text-gray-400 uppercase tracking-widest border-b border-gray-100 dark:border-white/5 my-1">移动到</div>
                      <div class="max-h-32 overflow-y-auto scrollbar-none">
-                       <button v-for="c in store.localCollections" :key="'mv'+c.id" 
-                               @click="handleBatchMove(c.id); isManageOpen = false" 
+                       <button v-for="c in store.localCollections" :key="'mv'+c.id"
+                               @click="handleBatchMove(c.id); isManageOpen = false"
                                :disabled="store.activeCollectionId === c.id"
                                :class="store.activeCollectionId === c.id ? 'opacity-30 cursor-not-allowed' : 'hover:bg-primary-50 dark:hover:bg-white/5'"
                                class="w-full text-left px-4 py-2 text-xs rounded-xl font-bold flex items-center gap-2 transition-colors">
@@ -778,53 +1229,61 @@ function onVideoDrop(event, targetBvid) {
                </div>
 
                <template v-if="store.activeCollectionId">
-                 <button @click="handleBatchRemoveLink" class="btn-batch text-orange-600 bg-orange-50 hover:bg-orange-100 dark:bg-orange-500/10 dark:text-orange-400 ml-auto" title="移除">
-                   <XCircleIcon class="w-4 h-4" /> <span v-if="windowWidth >= 1200">移除</span>
+                 <button @click="handleBatchRemoveLink" class="btn-batch text-orange-600 bg-orange-50 hover:bg-orange-100 dark:bg-orange-500/10 dark:text-orange-400" title="移除">
+                   <XCircleIcon class="w-4 h-4 shrink-0" /> <span>移除</span>
                  </button>
-                 <button @click="handleBatchDelete" class="btn-batch text-red-600 bg-red-50 hover:bg-red-100 dark:bg-red-500/10 dark:text-red-400 mr-2" title="删除文件">
-                   <TrashIcon class="w-4 h-4" /> <span v-if="windowWidth >= 1200">删文件</span>
+                 <button @click="handleBatchDelete" class="btn-batch text-red-600 bg-red-50 hover:bg-red-100 dark:bg-red-500/10 dark:text-red-400" title="删除文件">
+                   <TrashIcon class="w-4 h-4 shrink-0" /> <span>删文件</span>
                  </button>
                </template>
                <template v-else>
-                 <button @click="handleBatchDelete" class="btn-batch text-red-600 bg-red-50 hover:bg-red-100 dark:bg-red-500/10 dark:text-red-400 ml-auto mr-2" title="彻底删除">
-                   <TrashIcon class="w-4 h-4" /> <span v-if="windowWidth >= 1200">彻底删除</span>
+                 <button @click="handleBatchDelete" class="btn-batch text-red-600 bg-red-50 hover:bg-red-100 dark:bg-red-500/10 dark:text-red-400" title="彻底删除">
+                   <TrashIcon class="w-4 h-4 shrink-0" /> <span>彻底删除</span>
                  </button>
                </template>
                
-               <button @click="store.selectedBvids = []" class="text-[10px] font-black text-gray-400 hover:text-primary-500 uppercase tracking-widest px-2 lg:px-4 active:scale-95 transition">取消</button>
+               <button @click="store.selectedBvids = []" class="text-[10px] font-black text-gray-400 hover:text-primary-500 uppercase tracking-widest px-2 lg:px-4 active:scale-95 transition ml-auto">取消</button>
             </div>
           </template>
         </div>
 
         <!-- 视频网格 -->
-        <div class="flex-1 overflow-y-auto pr-2 pb-20 scrollbar-thin">
-          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4 lg:gap-6">
+        <div class="flex-1 overflow-y-auto pr-2 pb-24 scrollbar-thin relative">
+          <!-- 拖拽分隔线覆盖层（竖向） -->
+          <div v-if="dragOverBvid && dragInsertPosition"
+               class="fixed pointer-events-none z-[100]"
+               :style="getDropLineStyle()">
+            <div class="w-full h-full bg-gradient-to-b from-transparent via-primary-500 to-transparent relative"
+                 style="box-shadow: 0 0 20px rgba(236,72,153,1);">
+              <div class="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 bg-white dark:bg-gray-900 rounded-full border-2 border-primary-500"></div>
+            </div>
+          </div>
+          
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4 lg:gap-6 p-2"
+               @dragover="onGridDragOver"
+               @drop="onGridDrop">
             <div v-for="(v, index) in filteredVideos" :key="v.bvid"
                  @click="handleCardClick($event, v.bvid, index)"
+                 @contextmenu="showContextMenu($event, v)"
                  draggable="true"
                  @dragstart="onVideoDragStart($event, v.bvid)"
-                 @dragover="onVideoDragOver($event, v.bvid)"
-                 @drop="onVideoDrop($event, v.bvid)"
-                 @dragend="dragOverBvid = null"
-                 class="group relative flex flex-col bg-white dark:bg-white/5 rounded-[2.5rem] overflow-hidden border-2 transition-all duration-200 cursor-pointer hover:shadow-2xl hover:-translate-y-1"
-                 :class="[
-                   store.selectedBvids.includes(v.bvid) ? 'ring-2 ring-primary-500 ring-offset-4 dark:ring-offset-black shadow-xl' : '',
-                   (v.download_status === 'downloading' || v.download_status === 'pending') ? 'bg-blue-50/50 dark:bg-blue-500/5 border-blue-200/50 dark:border-blue-500/20' : 'border-gray-200 dark:border-white/5',
-                   dragOverBvid === v.bvid ? 'opacity-40 scale-95 border-primary-500' : ''
-                 ]">
-              
-              <!-- 拖拽提示条 (视频卡片版) -->
-              <div v-if="dragOverBvid === v.bvid" 
-                   class="absolute inset-0 bg-primary-500/10 z-50 pointer-events-none border-2 border-primary-500 border-dashed rounded-[2.5rem]">
-              </div>
+                 @dragover="onVideoDragOver($event, v.bvid, index)"
+                 @drop="onVideoDrop($event, v.bvid, index)"
+                 @dragend="dragOverBvid = null; dragInsertPosition = null"
+                 :data-video-bvid="v.bvid"
+                 class="group flex flex-col bg-white dark:bg-white/5 rounded-[2rem] overflow-visible transition-all duration-200 cursor-pointer hover:shadow-2xl hover:-translate-y-1 box-border"
+                   :class="[
+                     store.selectedBvids.includes(v.bvid) ? 'ring-4 ring-primary-500 ring-offset-0 shadow-xl' : 'border border-gray-200 dark:border-white/5',
+                     (v.download_status === 'downloading' || v.download_status === 'pending') ? 'bg-blue-50/50 dark:bg-blue-500/5 border-blue-200/50 dark:border-blue-500/20' : ''
+                   ]">
 
-              <div class="w-full aspect-video relative bg-gray-200 dark:bg-gray-900 overflow-hidden shrink-0"
-                 @contextmenu.prevent="openBiliVideo(v.bvid)">
+              <div class="w-full aspect-video relative bg-gray-200 dark:bg-gray-900 overflow-hidden shrink-0 rounded-t-[2rem]">
               
               <!-- 封面图：处理本地音频可能没有封面的情况 -->
               <template v-if="v.pic && store.formatImg(v.pic)">
-                <img :src="store.formatImg(v.pic)" class="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110"
-                     :class="{'opacity-40 blur-md': v.download_status === 'downloading'}" />
+                <img :src="store.formatImg(v.pic, '640w_360h_1c_1s.webp')" @error="(e) => { if (e.target.src.indexOf('default-cover.svg') === -1) e.target.src = '/default-cover.svg' }" class="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110 rounded-t-[2rem]"
+                     :class="{'opacity-40 blur-md': v.download_status === 'downloading'}"
+                     style="image-rendering: auto; transform: translateZ(0); backface-visibility: hidden;" />
               </template>
               <div v-else class="w-full h-full bg-gray-900 flex items-center justify-center">
                 <AudioIcon class="w-16 h-16 text-primary-500/20" />
@@ -835,10 +1294,16 @@ function onVideoDrop(event, targetBvid) {
                    <div class="w-full h-1 bg-black/10 dark:bg-white/10 rounded-full mt-3 overflow-hidden">
                      <div class="h-full bg-blue-500 transition-all duration-200" :style="{width: v.progress + '%'}"></div>
                    </div>
+                   <button @click.stop="store.cancelDownload(v.bvid)" class="mt-3 px-3 py-1.5 bg-red-500/90 hover:bg-red-600 text-white text-xs font-black rounded-lg transition-all active:scale-95 shadow-lg">
+                     取消下载
+                   </button>
                 </div>
                 
                 <div v-else-if="v.download_status === 'pending'" class="absolute inset-0 flex flex-col items-center justify-center bg-black/40">
                    <ArrowPathIcon class="w-8 h-8 text-white/50 animate-spin" />
+                   <button @click.stop="store.cancelDownload(v.bvid)" class="mt-3 px-3 py-1.5 bg-red-500/90 hover:bg-red-600 text-white text-xs font-black rounded-lg transition-all active:scale-95 shadow-lg">
+                     取消
+                   </button>
                 </div>
                 
                 <template v-else>
@@ -919,12 +1384,34 @@ function onVideoDrop(event, targetBvid) {
     </UniversalModal>
     
     <TrimEditor :show="showTrimEditor" :bvid="trimTargetBvid" @close="showTrimEditor = false" />
+    
+    <!-- 添加视频输入弹窗 -->
+    <AddVideoInputModal
+      :show="showAddVideoInput"
+      @close="showAddVideoInput = false"
+      @confirm="handleAddVideoInput" />
+    
+    <!-- 添加视频预览弹窗 -->
+    <VideoPreviewModal
+      :show="showAddVideoPreview"
+      :video-info="addVideoData"
+      modal-style="centered"
+      @close="handleVideoPreviewClose"
+      @confirm="handleVideoPreviewConfirm" />
+    
+    <!-- 添加视频媒体库选择弹窗 -->
+    <CollectionSelectModal
+      :show="showAddVideoCollectionSelect"
+      :video-info="addVideoData"
+      title="选择媒体库"
+      @close="handleAddVideoCollectionSelectClose"
+      @confirm="handleAddVideoCollectionSelect" />
   </div>
 </template>
 
 <style scoped>
 .btn-batch {
-  @apply flex items-center gap-1.5 px-3 py-2 rounded-xl text-[10px] font-black transition-all whitespace-nowrap uppercase tracking-tighter shadow-sm hover:scale-105 active:scale-95;
+  @apply flex items-center px-3 py-2 rounded-xl text-[10px] font-black transition-all whitespace-nowrap uppercase tracking-tighter shadow-sm hover:scale-105 active:scale-95;
 }
 
 .line-clamp-2 {

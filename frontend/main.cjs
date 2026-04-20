@@ -96,9 +96,10 @@ async function startPythonBackend() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
+    title: 'BiliMusic',
     width: 1200,
     height: 800,
-    minWidth: 800,
+    minWidth: 880,
     minHeight: 600,
     webPreferences: {
       nodeIntegration: true,

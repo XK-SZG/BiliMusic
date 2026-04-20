@@ -69,7 +69,7 @@ export const BILIBILI_SETTINGS = {
   },
   customBackgrounds: [],
   shortcuts: { play: "Space", prev: "BracketLeft", next: "BracketRight", volumeUp: "ArrowUp", volumeDown: "ArrowDown", seekForward: "ArrowRight", seekBackward: "ArrowLeft", mute: "KeyM", fullscreen: "KeyF", immersive: "KeyI", toggleUi: "Enter", toggleTheme: "KeyT" },
-  cardImage: "/local_stickers/9e9ad747_2233-图标.png",
+  cardImage: "/local_stickers/90dfd622_2233.png",
   cardImageSize: 100,
   cardOffsetX: -25,
   cardOffsetY: 10,

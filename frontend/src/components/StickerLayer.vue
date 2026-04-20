@@ -20,14 +20,17 @@ const settingsStore = useSettingsStore()
 const themeStore = useThemeStore()
 const containerRef = ref(null)
 
-// 重新定义 activeStickers 计算属性
+// 使用响应式对象记录加载状态和错误状态
+const loadedStatus = reactive({})
+const errorStatus = reactive({})
+
+// 重新定义 activeStickers 计算属性 - 过滤掉加载失败的贴画
 const activeStickers = computed(() => {
   if (settingsStore.settings.stickersEnabled === false) return []
-  return settingsStore.settings.stickers?.[props.target] || []
+  const stickers = settingsStore.settings.stickers?.[props.target] || []
+  // 过滤掉已知加载失败的贴画
+  return stickers.filter(s => !errorStatus[s.url])
 })
-
-// 使用响应式对象记录加载状态
-const loadedStatus = reactive({})
 
 // 构造内联样式
 const getStickerStyle = (s) => {
@@ -50,6 +53,11 @@ const getStickerStyle = (s) => {
 
 function onImageLoad(url) {
   loadedStatus[url] = true
+}
+
+function onImageError(url) {
+  errorStatus[url] = true
+  console.warn(`[StickerLayer] 贴画加载失败，已自动隐藏: ${url}`)
 }
 
 // 拖拽逻辑
@@ -149,6 +157,7 @@ onUnmounted(() => {
          :src="themeStore.stickerDataBundle[s.url] || (s.url.startsWith('http') ? s.url : `http://127.0.0.1:12243${s.url}`)"
          :style="getStickerStyle(s)"
          @load="onImageLoad(s.url)"
+         @error="onImageError(s.url)"
          @mousedown.stop.prevent="startDrag($event, s)"
          @wheel.stop.prevent="handleWheel($event, s)"
          class="object-contain max-w-none"

@@ -9,9 +9,10 @@ import { useThemeStore } from '../stores/modules/theme'
 import systemApi from '../api/system'
 import themeApi from '../api/theme'
 import UniversalModal from '../components/UniversalModal.vue'
-import { 
-  TvIcon, 
-  ArrowDownTrayIcon, 
+import AgreementModal from '../components/AgreementModal.vue'
+import {
+  TvIcon,
+  ArrowDownTrayIcon,
   SpeakerWaveIcon,
   LockClosedIcon,
   ChevronDownIcon,
@@ -43,7 +44,8 @@ import {
   CheckCircleIcon,
   ExclamationTriangleIcon,
   PowerIcon,
-  InformationCircleIcon
+  InformationCircleIcon,
+  MagnifyingGlassIcon
 } from '@heroicons/vue/24/solid'
 
 const store = usePlayerStore()
@@ -54,28 +56,65 @@ const modalState_themeName = reactive({ show: false, value: '' })
 const modalState_themeDel = reactive({ show: false, targetId: null })
 const modalState_themeEdit = reactive({ show: false, targetId: null })
 
+// 用户协议弹窗状态
+const showAgreementModal = ref(false)
+
+// 应用版本号（从 Vite 环境变量注入）
+const appVersion = __APP_VERSION__
+
 const systemFonts = ref([])
 const isScanningFonts = ref(false)
 
-// 导航配置
+// 搜索功能
+const searchQuery = ref('')
+const searchResults = ref([])
+
+// 导航配置（添加关键词用于搜索）
 const navItems = [
-  { name: '主题样式', id: 'section-themes', icon: SwatchIcon },
-  { name: '主题色彩', id: 'section-theme', icon: PaintBrushIcon },
-  { name: '排版字体', id: 'section-font', icon: LanguageIcon },
-  { name: '界面贴画', id: 'section-stickers', icon: RectangleGroupIcon },
-  { name: '全景粒子', id: 'section-particles', icon: SunIcon },
-  { name: '频谱呈现', id: 'section-visualizer', icon: SparklesOutlineIcon },
-  { name: '视觉实验室', id: 'section-visual-lab', icon: ArrowsPointingOutIcon },
-  { name: '背景视觉', id: 'section-background', icon: PhotoIcon },
-  { name: '快捷键', id: 'section-shortcuts', icon: CommandLineIcon },
-  { name: '交互过渡', id: 'section-interaction', icon: ArrowPathRoundedSquareIcon },
-  { name: '启动行为', id: 'section-startup', icon: RocketLaunchIcon },
-  { name: '媒体质量', id: 'section-quality', icon: TvIcon },
-  { name: '算法实验室', id: 'section-algorithm', icon: ScaleIcon },
-  { name: '基础音量', id: 'section-volume', icon: SpeakerWaveIcon },
-  { name: '数据同步', id: 'section-sync', icon: CircleStackIcon },
-  { name: '关于软件', id: 'section-about', icon: InformationCircleIcon }
+  { name: '主题样式', id: 'section-themes', icon: SwatchIcon, keywords: ['主题', '样式', '外观', '皮肤', 'theme', 'style'] },
+  { name: '主题色彩', id: 'section-theme', icon: PaintBrushIcon, keywords: ['颜色', '色彩', '主题色', '配色', 'color', 'theme'] },
+  { name: '排版字体', id: 'section-font', icon: LanguageIcon, keywords: ['字体', '文字', '排版', 'font', 'text'] },
+  { name: '界面贴画', id: 'section-stickers', icon: RectangleGroupIcon, keywords: ['贴画', '贴纸', '装饰', 'sticker', 'decoration'] },
+  { name: '全景粒子', id: 'section-particles', icon: SunIcon, keywords: ['粒子', '特效', '动画', 'particle', 'effect'] },
+  { name: '频谱呈现', id: 'section-visualizer', icon: SparklesOutlineIcon, keywords: ['频谱', '可视化', '音频', 'visualizer', 'audio'] },
+  { name: '视觉实验室', id: 'section-visual-lab', icon: ArrowsPointingOutIcon, keywords: ['视觉', '实验', '效果', 'visual', 'effect'] },
+  { name: '背景视觉', id: 'section-background', icon: PhotoIcon, keywords: ['背景', '壁纸', '图片', 'background', 'wallpaper'] },
+  { name: '快捷键', id: 'section-shortcuts', icon: CommandLineIcon, keywords: ['快捷键', '键盘', '热键', 'shortcut', 'hotkey'] },
+  { name: '交互过渡', id: 'section-interaction', icon: ArrowPathRoundedSquareIcon, keywords: ['过渡', '动画', '交互', 'transition', 'animation'] },
+  { name: '启动行为', id: 'section-startup', icon: RocketLaunchIcon, keywords: ['启动', '开机', '自动', 'startup', 'boot'] },
+  { name: '媒体质量', id: 'section-quality', icon: TvIcon, keywords: ['质量', '清晰度', '画质', 'quality', 'resolution'] },
+  { name: '算法实验室', id: 'section-algorithm', icon: ScaleIcon, keywords: ['算法', '播放', '模式', 'algorithm', 'mode'] },
+  { name: '基础音量', id: 'section-volume', icon: SpeakerWaveIcon, keywords: ['音量', '声音', '音频', 'volume', 'sound'] },
+  { name: '数据同步', id: 'section-sync', icon: CircleStackIcon, keywords: ['同步', '备份', '数据', 'sync', 'backup'] },
+  { name: '关于软件', id: 'section-about', icon: InformationCircleIcon, keywords: ['关于', '版本', '信息', 'about', 'version'] }
 ]
+
+// 搜索逻辑
+watch(searchQuery, (newQuery) => {
+  const query = newQuery.trim().toLowerCase()
+  if (!query) {
+    searchResults.value = []
+    return
+  }
+  
+  searchResults.value = navItems.filter(item => {
+    // 匹配名称或关键词
+    return item.name.toLowerCase().includes(query) ||
+           item.keywords.some(keyword => keyword.toLowerCase().includes(query))
+  })
+})
+
+// 清除搜索
+function clearSearch() {
+  searchQuery.value = ''
+  searchResults.value = []
+}
+
+// 搜索结果点击
+function handleSearchResultClick(item) {
+  scrollToSection(item.id)
+  clearSearch()
+}
 
 const activeSection = ref(navItems[0].id)
 const scrollContainer = ref(null)
@@ -571,7 +610,7 @@ async function executeLibraryImport() {
   }
 }
 
-// ---------------- 恢复出厂设置逻辑 ----------------
+// ---------------- 重置软件逻辑 ----------------
 const resetState = reactive({
   step: 0,
   showModal: false
@@ -632,7 +671,7 @@ function confirmResetStep() {
 
 async function executeFactoryReset() {
   resetState.showModal = false
-  store.showToast('正在执行恢复出厂设置，请稍候...', 'info')
+  store.showToast('正在执行重置软件，请稍候...', 'info')
   try {
     await systemApi.factoryReset()
     
@@ -670,12 +709,47 @@ async function executeFactoryReset() {
 </script>
 
 <template>
-  <div class="max-w-6xl mx-auto h-full flex flex-col lg:flex-row gap-8 p-4 lg:p-6 animate-fade-in pb-40">
+  <div class="max-w-6xl mx-auto h-full flex flex-col lg:flex-row gap-8 p-4 lg:p-6 animate-fade-in lg:pb-10">
     
     <!-- 左侧快捷导航 (仅桌面端显示) -->
     <aside class="hidden lg:flex w-64 flex-col gap-1 sticky top-6 self-start shrink-0 max-h-[calc(100vh-14rem)]">
       <div class="px-4 mb-4 shrink-0">
         <h2 class="text-3xl font-black text-gray-800 dark:text-white tracking-tight">系统设置</h2>
+      </div>
+      
+      <!-- 搜索框 -->
+      <div class="relative mb-4 px-4">
+        <MagnifyingGlassIcon class="w-4 h-4 absolute left-7 top-3 text-gray-400" />
+        <input
+          v-model="searchQuery"
+          placeholder="搜索设置项..."
+          class="w-full bg-white dark:bg-gray-800 border border-gray-200 dark:border-white/10 rounded-xl pl-10 pr-10 py-2.5 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-primary-500 transition-all text-gray-800 dark:text-white"
+        />
+        <button
+          v-if="searchQuery"
+          @click="clearSearch"
+          class="absolute right-7 top-3 text-gray-400 hover:text-gray-600 transition-colors"
+        >
+          <XMarkSolidIcon class="w-4 h-4" />
+        </button>
+      </div>
+      
+      <!-- 搜索结果 -->
+      <div v-if="searchResults.length > 0" class="mb-4 mx-4 p-3 bg-primary-50 dark:bg-primary-500/10 rounded-xl border border-primary-200 dark:border-primary-500/20">
+        <div class="text-xs font-black text-primary-600 dark:text-primary-400 uppercase tracking-widest mb-2">
+          搜索结果 ({{ searchResults.length }})
+        </div>
+        <div class="space-y-1">
+          <button
+            v-for="item in searchResults"
+            :key="item.id"
+            @click="handleSearchResultClick(item)"
+            class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left transition-all hover:bg-primary-100 dark:hover:bg-primary-500/20 text-sm font-bold text-gray-700 dark:text-gray-200"
+          >
+            <component :is="item.icon" class="w-4 h-4 text-primary-500" />
+            <span>{{ item.name }}</span>
+          </button>
+        </div>
       </div>
       
       <nav class="space-y-1 overflow-y-auto scrollbar-none pb-4">
@@ -692,25 +766,25 @@ async function executeFactoryReset() {
     <!-- 右侧滚动内容 -->
     <div ref="scrollContainer" class="flex-1 space-y-10 overflow-y-auto pr-2 scroll-smooth no-scrollbar" @scroll="handleScroll">
       
-      <!-- 恢复出厂设置警告弹窗 -->
-      <UniversalModal :show="resetState.showModal" type="confirm" 
+      <!-- 重置软件警告弹窗 -->
+      <UniversalModal :show="resetState.showModal" type="confirm"
         :title="resetState.step === 1 ? '第一次警告' : resetState.step === 2 ? '第二次警告' : '最终警告'"
-        :extra-data="{ 
-          message: resetState.step === 1 ? '您正在尝试恢复出厂设置。这会清空所有媒体库和设置，确定要继续吗？' : 
-                   resetState.step === 2 ? '所有下载的音视频缓存、收藏数据都会被永久删除，请问是否继续？' : 
-                   '这是最后一次机会。一旦点击确认，所有数据将灰飞烟灭。确定吗？', 
-          isDanger: true, 
-          confirmText: resetState.step === 3 ? '确认销毁' : '继续', 
-          cancelText: '取消' 
+        :extra-data="{
+          message: resetState.step === 1 ? '您正在尝试重置软件。这会清空所有媒体库和设置，确定要继续吗？' :
+                   resetState.step === 2 ? '所有下载的音视频缓存、收藏数据都会被永久删除，请问是否继续？' :
+                   '这是最后一次机会。一旦点击确认，所有数据将灰飞烟灭。确定吗？',
+          isDanger: true,
+          confirmText: resetState.step === 3 ? '确认销毁' : '继续',
+          cancelText: '取消',
+          requireConfirm: true  // 修复：添加 requireConfirm 标志
         }"
-        @close="() => {}"
-        @confirm="(confirmed) => { 
+        @confirm="(confirmed) => {
           if(confirmed) {
             confirmResetStep()
-          } else { 
-            resetState.showModal = false; 
-            resetState.step = 0; 
-          } 
+          } else {
+            resetState.showModal = false;
+            resetState.step = 0;
+          }
         }" />
 
       <!-- 卸载软件警告弹窗 -->
@@ -722,9 +796,9 @@ async function executeFactoryReset() {
                    '点击确认后，程序将立即关闭并启动卸载向导。确定卸载？',
           isDanger: true,
           confirmText: uninstallState.step === 3 ? '立即卸载' : '继续',
-          cancelText: '取消'
+          cancelText: '取消',
+          requireConfirm: true  // 修复：添加 requireConfirm 标志
         }"
-        @close="() => {}"
         @confirm="(confirmed) => {
           if(confirmed) {
             confirmUninstallStep()
@@ -835,7 +909,7 @@ async function executeFactoryReset() {
                    </label>
                  </span>
                  <div class="mt-2 h-20 bg-gray-50 dark:bg-black/20 rounded-xl flex items-center justify-center border border-gray-200 dark:border-white/10 relative overflow-hidden">
-                   <img v-if="editThemeData.cardImage" :src="`http://127.0.0.1:12243${editThemeData.cardImage}`" class="h-full object-contain drop-shadow-md" />
+                   <img v-if="editThemeData.cardImage" :src="`http://127.0.0.1:12243${editThemeData.cardImage}`" @error="(e) => e.target.style.display='none'" class="h-full object-contain drop-shadow-md" />
                    <div v-else class="text-[10px] text-gray-400 font-bold uppercase tracking-widest">使用默认样式</div>
                    <button v-if="editThemeData.cardImage" @click="editThemeData.cardImage = ''" class="absolute right-2 top-2 p-1 bg-red-500 text-white rounded-md shadow hover:bg-red-600 transition"><TrashIcon class="w-3 h-3" /></button>
                  </div>
@@ -888,10 +962,10 @@ async function executeFactoryReset() {
           </div>
         </div>
         
-        <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4 max-h-[360px] overflow-y-auto pr-2 scrollbar-thin">
+        <div class="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4 max-h-[360px] overflow-y-auto pr-2 scrollbar-thin">
           <div v-for="t in themeStore.themes" :key="t.id"
                @click="themeStore.applyThemeById(t.id)"
-               class="group relative flex flex-col p-5 bg-white dark:bg-gray-800 rounded-2xl border-[3px] transition-all cursor-pointer overflow-hidden"
+               class="group relative flex flex-col p-5 bg-white dark:bg-gray-800 rounded-2xl border-[3px] transition-all cursor-pointer overflow-hidden aspect-square"
                :class="themeStore.activeThemeId === t.id ? 'shadow-xl scale-[1.02]' : 'border-transparent hover:border-gray-200 dark:hover:border-white/10 hover:scale-[1.01]'"
                :style="themeStore.activeThemeId === t.id ? { borderColor: getThemeColor(t), boxShadow: `0 20px 25px -5px ${getThemeColor(t)}33` } : {}">
             
@@ -1057,7 +1131,7 @@ async function executeFactoryReset() {
                 <div class="flex flex-col lg:flex-row lg:items-center gap-6">
                   <!-- 缩略图 -->
                   <div class="w-full lg:w-24 h-24 bg-gray-100 dark:bg-black/40 rounded-lg overflow-hidden shrink-0 flex items-center justify-center p-2 border border-gray-200 dark:border-white/5">
-                    <img :src="`http://127.0.0.1:12243${s.url}`" class="max-w-full max-h-full object-contain drop-shadow-md" />
+                    <img :src="`http://127.0.0.1:12243${s.url}`" @error="(e) => e.target.style.display='none'" class="max-w-full max-h-full object-contain drop-shadow-md" />
                   </div>
                   <!-- 控制器：改为垂直排列以支持输入框 -->
                   <div class="flex-1 flex flex-col gap-4 w-full">
@@ -1491,11 +1565,11 @@ async function executeFactoryReset() {
 
               <div class="max-h-[380px] overflow-y-auto pr-2 scrollbar-thin">
                 <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-4 pb-4">
-                  <div v-for="bg in themeStore.customBackgrounds" :key="bg.name" 
+                  <div v-for="bg in themeStore.customBackgrounds" :key="bg.name"
                        @click="toggleBgSelection(bg.name)"
-                       class="group relative aspect-video rounded-2xl overflow-hidden border-2 transition-all cursor-pointer bg-black"
+                       class="group relative aspect-video rounded-2xl overflow-hidden border-2 transition-all cursor-pointer bg-black min-w-[120px]"
                        :class="selectedBgNames.includes(bg.name) ? 'border-emerald-500 ring-4 ring-emerald-500/20' : 'border-gray-200 dark:border-white/5'">
-                    <img :src="`http://127.0.0.1:12243${bg.url}`" class="w-full h-full object-cover transition-all duration-500"
+                    <img :src="`http://127.0.0.1:12243${bg.url}`" @error="(e) => e.target.style.display='none'" class="w-full h-full object-cover transition-all duration-500"
                          :class="selectedBgNames.includes(bg.name) ? 'scale-110 opacity-100' : 'opacity-70 group-hover:opacity-100'" />
                     <div class="absolute top-2 left-2 w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all"
                          :class="selectedBgNames.includes(bg.name) ? 'bg-emerald-500 border-emerald-500' : 'bg-black/20 border-white/50'">
@@ -1689,10 +1763,10 @@ async function executeFactoryReset() {
               <h4 class="font-black text-red-600 dark:text-red-400">危险操作 (Danger Zone)</h4>
            </div>
            <p class="text-xs text-red-500/80 dark:text-red-400/80 leading-relaxed text-center px-4">
-             恢复出厂设置将清空所有本地数据，包括媒体库、播放队列、系统设置以及所有的音视频缓存文件（系统及默认主题的静态资源除外）。<br/><b>此操作不可逆！</b>
+             重置软件将清空所有本地数据，包括媒体库、播放队列、系统设置以及所有的音视频缓存文件（系统及默认主题的静态资源除外）。<br/><b>此操作不可逆！</b>
            </p>
            <button @click="handleFactoryResetClick" class="w-full py-3 bg-red-500 hover:bg-red-600 text-white rounded-2xl font-black shadow-lg shadow-red-500/30 transition active:scale-95 flex items-center justify-center gap-2">
-             <TrashIcon class="w-5 h-5" /> 恢复出厂设置
+             <TrashIcon class="w-5 h-5" /> 重置软件
            </button>
 
            <button @click="handleUninstallClick" class="w-full py-3 mt-4 bg-gray-800 dark:bg-white text-white dark:text-black hover:bg-black dark:hover:bg-gray-200 rounded-2xl font-black shadow-lg transition active:scale-95 flex items-center justify-center gap-2">
@@ -1719,7 +1793,7 @@ async function executeFactoryReset() {
           <div class="flex-1 space-y-6 text-center md:text-left">
             <div>
               <h4 class="text-2xl font-black text-gray-800 dark:text-white tracking-tight">BiliMusic</h4>
-              <p class="text-xs font-bold text-primary-500 uppercase tracking-[0.2em] mt-1">Version 1.0.0</p>
+              <p class="text-xs font-bold text-primary-500 uppercase tracking-[0.2em] mt-1">Version {{ appVersion }}</p>
             </div>
 
             <p class="text-sm text-gray-500 dark:text-gray-400 leading-relaxed max-w-2xl">
@@ -1741,11 +1815,29 @@ async function executeFactoryReset() {
                 <span class="text-sm font-bold text-gray-700 dark:text-gray-200">Vue / FastAPI</span>
               </div>
             </div>
+
+            <!-- 用户协议与隐私政策按钮 -->
+            <div class="pt-4">
+              <button
+                @click="showAgreementModal = true"
+                class="inline-flex items-center gap-2 px-6 py-3 bg-primary-500/10 hover:bg-primary-500/20 text-primary-600 dark:text-primary-400 rounded-2xl font-bold text-sm transition-all duration-300 hover:scale-105 active:scale-95 border border-primary-200 dark:border-primary-800/50"
+              >
+                <LockClosedIcon class="w-4 h-4" />
+                查看用户协议与隐私政策
+              </button>
+            </div>
           </div>
         </div>
       </section>
 
     </div>
+
+    <!-- 用户协议弹窗 -->
+    <AgreementModal
+      :show="showAgreementModal"
+      @agree="showAgreementModal = false"
+      @decline="showAgreementModal = false"
+    />
   </div>
 </template>
 

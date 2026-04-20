@@ -295,7 +295,7 @@ function toggleFullImmersive() {
 
             <!-- 加载中动画叠加层 (移入挂载点内部以支持全屏显示) -->
             <div v-if="store.isBuffering" class="absolute inset-0 flex items-center justify-center bg-black/20 backdrop-blur-[2px] z-50">
-              <img :src="LOADING_FRAMES[currentFrameIndex]" class="w-12 h-12 object-contain drop-shadow-[0_0_8px_rgba(255,255,255,0.2)]" v-if="LOADING_FRAMES[currentFrameIndex]" />
+              <img :src="LOADING_FRAMES[currentFrameIndex]" @error="(e) => e.target.style.display='none'" class="w-12 h-12 object-contain drop-shadow-[0_0_8px_rgba(255,255,255,0.2)]" v-if="LOADING_FRAMES[currentFrameIndex]" />
               <div v-else class="w-10 h-10 border-4 border-primary-500 border-t-transparent rounded-full animate-spin"></div>
             </div>
           </div>
@@ -315,8 +315,9 @@ function toggleFullImmersive() {
               
               <!-- 封面 -->
               <img v-if="store.currentVideo.pic && store.formatImg(store.currentVideo.pic)" 
-                   :src="store.formatImg(store.currentVideo.pic)" 
-                   class="w-[45%] h-[45%] object-cover rounded-full shadow-[0_0_20px_rgba(0,0,0,0.9)] z-10" />
+                   :src="store.formatImg(store.currentVideo.pic, '640w_640h_1c_1s.webp')"
+                   class="w-[45%] h-[45%] object-cover rounded-full shadow-[0_0_20px_rgba(0,0,0,0.9)] z-10"
+                   style="image-rendering: auto; transform: translateZ(0); backface-visibility: hidden;" />
               <div v-else class="w-[45%] h-[45%] bg-gray-900 rounded-full flex items-center justify-center shadow-[0_0_20px_rgba(0,0,0,0.9)] z-10">
                 <MusicalNoteIcon class="w-16 h-16 text-primary-500/50" />
               </div>

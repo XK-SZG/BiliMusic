@@ -89,6 +89,19 @@ def create_local_collection(title: str, db_session: Session = Depends(db.get_db)
     db_session.commit()
     return {"id": new_id, "title": title}
 
+class RenameCollectionReq(BaseModel):
+    title: str
+
+@router.put("/api/local/collections/{col_id}")
+def rename_collection(col_id: str, req: RenameCollectionReq, db_session: Session = Depends(db.get_db)):
+    """重命名本地媒体夹"""
+    col = db_session.query(models.Collection).filter(models.Collection.id == col_id).first()
+    if col:
+        col.title = req.title
+        db_session.commit()
+        return {"status": "success"}
+    raise HTTPException(status_code=404, detail="Collection not found")
+
 @router.delete("/api/local/collections/{col_id}")
 def delete_collection(col_id: str, db_session: Session = Depends(db.get_db)):
     """删除本地媒体夹"""

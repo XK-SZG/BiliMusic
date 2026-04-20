@@ -5,6 +5,7 @@ from .play import router as play_router
 from .system import router as system_router
 from .theme import router as theme_router
 from .download import router as download_router
+from .stats import router as stats_router
 
 __all__ = [
     "auth_router",
@@ -14,4 +15,5 @@ __all__ = [
     "system_router",
     "theme_router",
     "download_router",
+    "stats_router",
 ]

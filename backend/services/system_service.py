@@ -18,7 +18,7 @@ def execute_system_shutdown():
             raise Exception(f"关机指令执行失败: {result.stderr}")
 
 def execute_factory_reset(db_session: Session, bili):
-    """恢复出厂设置，清空所有数据但保留默认主题的静态资源"""
+    """重置软件，清空所有数据但保留默认主题的静态资源"""
     keep_files = set()
     default_themes = db_session.query(models.Theme).filter(models.Theme.is_default == 1).all()
     for t in default_themes:
@@ -60,6 +60,9 @@ def execute_factory_reset(db_session: Session, bili):
     db_session.query(models.Collection).delete()
     db_session.query(models.Tag).delete()
     db_session.query(models.Theme).filter(models.Theme.is_default == 0).delete()
+    # P3 阶段新增：清空统计数据表
+    db_session.query(models.PlayRecord).delete()
+    db_session.query(models.DailyStat).delete()
     db_session.commit()
 
     for af in ["bili_cookies.json", "bili_user_info.json"]:

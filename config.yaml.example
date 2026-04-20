@@ -1,0 +1,29 @@
+# BiliMusic 配置文件
+# 修改配置后需要重启应用才能生效
+
+# 服务器配置
+server:
+  host: "127.0.0.1"  # 后端服务监听地址，建议保持 127.0.0.1（仅本地访问）
+  port: 12280        # 后端服务端口，可根据需要修改（建议范围：10000-65535）
+  debug: false       # 是否启用调试模式（生产环境请设置为 false）
+
+# 存储配置
+storage:
+  download_path: "backend/data/downloads"  # 视频缓存目录
+  cache_limit_gb: 10                       # 缓存上限 (GB)，超过后自动清理旧文件
+
+# 调度器配置
+scheduler:
+  cleanup_interval_hours: 6  # 自动清理间隔（小时）
+
+# 下载配置
+download:
+  max_workers: 3              # 并发下载线程数
+  max_retries: 3              # 下载失败最大重试次数
+
+# 数据库配置
+database:
+  pool_size: 20               # 连接池大小
+  max_overflow: 40            # 最大溢出连接数
+  pool_timeout: 10            # 获取连接超时（秒）
+  pool_recycle: 1800          # 连接回收时间（秒）

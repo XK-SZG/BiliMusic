@@ -42,9 +42,14 @@ function onSeek(e) {
   store.seek(time)
 }
 
+let previousVolume = 0.7
 function toggleMute() {
-  if (store.volume > 0) store.setVolume(0)
-  else store.setVolume(settingsStore.settings.defaultVolume || 0.7)
+  if (store.volume > 0) {
+    previousVolume = store.volume
+    store.setVolume(0)
+  } else {
+    store.setVolume(previousVolume > 0 ? previousVolume : (settingsStore.settings.defaultVolume || 0.7))
+  }
 }
 
 function handleTogglePlay() {
@@ -89,7 +94,7 @@ watch(() => store.volumeShowTrigger, () => {
 })
 
 function openModePopover(e) { e.stopPropagation(); showModePopover.value = !showModePopover.value; showVolumePopover.value = false }
-function handleScore(delta) { if (store.userReacted) { store.showToast("此视频本轮已评分", "info"); return }; store.updateScoreBatch(delta) }
+function handleScore(delta) { if (store.userReacted) { store.showToast("此视频本轮已评分", "info"); return }; store.updateScoreBatch(delta).catch(() => {}) }
 
 function showVolume() {
   if (volumeHideTimer) clearTimeout(volumeHideTimer)
@@ -100,8 +105,83 @@ function hideVolume() {
   if (volumeHideTimer) clearTimeout(volumeHideTimer)
   volumeHideTimer = setTimeout(() => {
     showVolumePopover.value = false
+    showVolumeInputPopover.value = false
   }, 300) // 延迟 300ms 隐藏，防误触
 }
+
+function handleVolumeWheel(e) {
+  e.preventDefault()
+  const step = 0.02 // 默认步长 2%
+  if (e.deltaY < 0) {
+    store.setVolume(Math.min(1, store.volume + step))
+  } else {
+    store.setVolume(Math.max(0, store.volume - step))
+  }
+}
+
+const showVolumeInputPopover = ref(false)
+const manualVolumeInput = ref('')
+const volumeInputRef = ref(null)
+
+function toggleVolumeInput(e) {
+  e.stopPropagation()
+  showVolumeInputPopover.value = !showVolumeInputPopover.value
+  if (showVolumeInputPopover.value) {
+    manualVolumeInput.value = '' // 清空初始值，直接覆盖
+  }
+}
+
+function handleNumpadInput(num) {
+  if (manualVolumeInput.value.length >= 3) {
+    manualVolumeInput.value = num.toString() // 如果超过长度，重新开始输入
+  } else {
+    manualVolumeInput.value += num.toString()
+  }
+  let val = parseInt(manualVolumeInput.value)
+  if (!isNaN(val)) {
+    val = Math.max(0, Math.min(100, val))
+    store.setVolume(val / 100)
+  }
+}
+
+function handleNumpadClear() {
+  manualVolumeInput.value = ''
+  store.setVolume(0)
+}
+
+function handleVolumeKeydown(e) {
+  if (showVolumePopover.value || showVolumeInputPopover.value) {
+    if (e.key >= '0' && e.key <= '9') {
+      e.preventDefault()
+      e.stopPropagation()
+      if (!showVolumeInputPopover.value) {
+        showVolumeInputPopover.value = true
+        manualVolumeInput.value = ''
+      }
+      handleNumpadInput(e.key)
+    } else if (e.key === 'Backspace' || e.key === 'c' || e.key === 'C') {
+      e.preventDefault()
+      e.stopPropagation()
+      handleNumpadClear()
+    } else if (e.key === 'Enter' || e.key === 'Escape') {
+      e.preventDefault()
+      e.stopPropagation()
+      showVolumeInputPopover.value = false
+      showVolumePopover.value = false
+    }
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('click', closeAll)
+  window.addEventListener('keydown', handleVolumeKeydown)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('click', closeAll)
+  window.removeEventListener('keydown', handleVolumeKeydown)
+  if (timeInterval) clearInterval(timeInterval)
+})
 
 let timeInterval = null
 watch(() => store.lengthControl.enabled, (enabled) => {
@@ -116,9 +196,7 @@ watch(() => store.lengthControl.enabled, (enabled) => {
   } else { if (timeInterval) clearInterval(timeInterval) }
 })
 
-const closeAll = () => { showModePopover.value = false; showVolumePopover.value = false }
-onMounted(() => window.addEventListener('click', closeAll))
-onUnmounted(() => { window.removeEventListener('click', closeAll); if (timeInterval) clearInterval(timeInterval) })
+const closeAll = () => { showModePopover.value = false; showVolumePopover.value = false; showVolumeInputPopover.value = false }
 
 // 动态样式计算
 const barStyle = computed(() => ({
@@ -183,7 +261,7 @@ const barStyle = computed(() => ({
           <div class="relative w-16 h-16 rounded-lg overflow-hidden shadow-md border border-white/5 group-hover/info:scale-105 transition-transform shrink-0 
                       image-render-high-quality flex items-center justify-center bg-gray-900">
             <template v-if="store.currentVideo.pic && store.formatImg(store.currentVideo.pic)">
-              <img :src="store.formatImg(store.currentVideo.pic, '128w_128h_1c_1s.webp')" class="w-full h-full object-cover transform-gpu" />
+              <img :src="store.formatImg(store.currentVideo.pic, '320w_320h_1c_1s.webp')" @error="(e) => { if (e.target.src.indexOf('default-cover.svg') === -1) e.target.src = '/default-cover.svg' }" class="w-full h-full object-cover transform-gpu" style="image-rendering: auto; backface-visibility: hidden;" />
             </template>
             <MusicalNoteIcon v-else class="w-8 h-8 text-primary-500/50 animate-pulse drop-shadow-md" />
           </div>
@@ -195,10 +273,10 @@ const barStyle = computed(() => ({
       </div>
 
       <div class="flex-1 flex flex-col items-center min-w-[200px]">
-        <div class="flex items-center space-x-2 lg:space-x-5">
+        <div class="flex items-center space-x-2 lg:space-x-5 py-2">
           <button @click="handleScore(-0.5)" :class="store.userReacted ? 'opacity-10' : 'hover:text-blue-500'" class="hidden md:block p-1.5 text-gray-400 transition-all active:scale-90"><HandThumbDownIcon class="w-5 h-5" /></button>
           <button @click="store.prev()" class="p-1.5 text-gray-400 hover:text-primary-500 transition-colors transform active:scale-90"><BackwardIcon class="w-6 h-6 lg:w-7 lg:h-7" /></button>
-          <button @click="handleTogglePlay" class="w-10 h-10 lg:w-12 lg:h-12 bg-primary-500 rounded-full text-white flex items-center justify-center hover:bg-primary-600 shadow-xl transform hover:scale-105 transition active:scale-95"><PauseIcon v-if="store.isPlaying" class="w-6 h-6 lg:w-7 lg:h-7" /><PlayIcon v-else class="w-6 h-6 lg:w-7 lg:h-7 ml-0.5" /></button>
+          <button @click="handleTogglePlay" class="w-10 h-10 lg:w-12 lg:h-12 bg-primary-500 rounded-full text-white flex items-center justify-center hover:bg-primary-600 shadow-xl transform hover:scale-[1.03] transition active:scale-95"><PauseIcon v-if="store.isPlaying" class="w-6 h-6 lg:w-7 lg:h-7" /><PlayIcon v-else class="w-6 h-6 lg:w-7 lg:h-7 ml-0.5" /></button>
           <button @click="store.next()" class="p-1.5 text-gray-400 hover:text-primary-500 transition-colors transform active:scale-90"><ForwardIcon class="w-6 h-6 lg:w-7 lg:h-7" /></button>
           <button @click="handleScore(0.5)" :class="store.userReacted ? 'opacity-10' : 'hover:text-primary-500'" class="hidden md:block p-1.5 text-gray-400 transition-all active:scale-90"><HandThumbUpIcon class="w-5 h-5" /></button>
         </div>
@@ -209,33 +287,50 @@ const barStyle = computed(() => ({
         <button @click="settingsStore.toggleMiniMode()" class="p-2 text-gray-400 hover:text-primary-500 transition-all active:scale-90" title="最小化模式">
           <ArrowsPointingInIcon class="w-5 h-5" />
         </button>
-        <div class="relative" @mouseenter="showVolume" @mouseleave="hideVolume">
+        <div class="relative" @mouseenter="showVolume" @mouseleave="hideVolume" @wheel="handleVolumeWheel">
           <div class="hidden lg:flex items-center group/vol relative cursor-pointer p-4 -m-2">
             <button @click.stop="toggleMute" class="text-gray-400 hover:text-primary-500 transition-colors active:scale-90">
               <SpeakerXMarkIcon v-if="store.volume === 0" class="w-5 h-5" />
               <SpeakerWaveIcon v-else class="w-5 h-5" />
             </button>
           </div>
-          <!-- 音量悬浮窗 (大号横向, 右侧贴边防溢出) -->
+          <!-- 音量悬浮窗 (更紧凑的横向, 靠向屏幕右侧) -->
           <transition name="dropdown-volume">
-            <div v-if="showVolumePopover" 
-                 class="absolute bottom-[100%] right-0 mb-4 w-96 h-14 z-[100] bg-white dark:bg-gray-900 rounded-[1.5rem] shadow-2xl border border-gray-100 dark:border-white/10 overflow-hidden backdrop-blur-2xl flex items-center px-5 gap-4 origin-bottom-right">
+            <div v-if="showVolumePopover"
+                 class="absolute bottom-[100%] right-0 mb-4 w-64 lg:w-72 h-10 z-[100] bg-white dark:bg-gray-900 rounded-full shadow-xl border border-gray-100 dark:border-white/10 overflow-visible backdrop-blur-2xl flex items-center px-3 gap-3 origin-bottom-right transform translate-x-4 lg:translate-x-12">
               <button @click.stop="toggleMute" class="text-indigo-500 transition-colors shrink-0 hover:scale-110 active:scale-95">
-                <SpeakerXMarkIcon v-if="store.volume === 0" class="w-5 h-5" />
-                <SpeakerWaveIcon v-else class="w-5 h-5" />
+                <SpeakerXMarkIcon v-if="store.volume === 0" class="w-4 h-4" />
+                <SpeakerWaveIcon v-else class="w-4 h-4" />
               </button>
               
-              <div class="relative flex-1 h-2 bg-gray-100 dark:bg-black/40 rounded-full overflow-hidden flex items-center">
+              <div class="relative flex-1 h-1.5 bg-gray-100 dark:bg-black/40 rounded-full overflow-hidden flex items-center">
                 <!-- 自定义拖拽轨道 -->
                 <div class="absolute left-0 h-full bg-gradient-to-r from-indigo-500 to-indigo-400 transition-all duration-75" :style="{ width: (store.volume * 100) + '%' }"></div>
-                <input type="range" min="0" max="1" step="0.01" 
-                       :value="store.volume" 
-                       @input="(e) => store.setVolume(parseFloat(e.target.value))" 
+                <input type="range" min="0" max="1" step="0.01"
+                       :value="store.volume"
+                       @input="(e) => store.setVolume(parseFloat(e.target.value))"
                        class="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
               </div>
               
-              <div class="text-[12px] font-black text-indigo-500 shrink-0 tabular-nums w-8 text-right">
-                {{ Math.round(store.volume * 100) }}
+              <div class="relative shrink-0 flex items-center justify-end w-10">
+                <button @click.stop="toggleVolumeInput"
+                        class="text-[11px] font-black text-indigo-500 hover:bg-indigo-50 dark:hover:bg-indigo-500/20 px-2 py-1 rounded-lg transition-colors tabular-nums">
+                  {{ Math.round(store.volume * 100) }}
+                </button>
+
+                <!-- 数字键盘弹出层 -->
+                <transition name="scale">
+                  <div v-if="showVolumeInputPopover" @click.stop
+                       class="absolute bottom-[calc(100%+0.5rem)] right-0 w-32 bg-white dark:bg-gray-800 rounded-[1rem] shadow-xl border border-gray-100 dark:border-white/10 p-2 z-[110] origin-bottom-right flex flex-col gap-1.5">
+                    <div class="grid grid-cols-3 gap-1">
+                      <button v-for="n in 9" :key="n" @click="handleNumpadInput(n)" class="bg-gray-50 dark:bg-black/20 hover:bg-indigo-50 dark:hover:bg-indigo-500/20 text-gray-700 dark:text-gray-200 text-sm font-bold py-1.5 rounded-lg transition-colors">{{ n }}</button>
+                      <button @click="handleNumpadInput(0)" class="bg-gray-50 dark:bg-black/20 hover:bg-indigo-50 dark:hover:bg-indigo-500/20 text-gray-700 dark:text-gray-200 text-sm font-bold py-1.5 rounded-lg transition-colors col-span-2">0</button>
+                      <button @click="handleNumpadClear" class="bg-red-50 dark:bg-red-500/20 hover:bg-red-100 dark:hover:bg-red-500/30 text-red-500 text-xs font-black py-1.5 rounded-lg transition-colors flex items-center justify-center">
+                        C
+                      </button>
+                    </div>
+                  </div>
+                </transition>
               </div>
             </div>
           </transition>
@@ -259,6 +354,10 @@ const barStyle = computed(() => ({
 
 .dropdown-volume-enter-active, .dropdown-volume-leave-active { transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
 .dropdown-volume-enter-from, .dropdown-volume-leave-to { opacity: 0; transform: translate(85%, 10px) scale(0.95); }
+
+/* Numpad Scale 过渡 */
+.scale-enter-active, .scale-leave-active { transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1); }
+.scale-enter-from, .scale-leave-to { opacity: 0; transform: scale(0.95) translateY(10px); }
 
 input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 </style>

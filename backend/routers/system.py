@@ -5,7 +5,7 @@ import logging
 import platform
 import subprocess
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Response
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Response, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,65 @@ from ..dependencies import get_bili, get_downloader
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/system", tags=["system"])
+
+@router.get("/events")
+async def system_events(request: Request):
+    """SSE 全局事件总线（替代前端轮询）"""
+    import asyncio
+    
+    async def event_publisher():
+        from ..services.clipboard_service import pending_bvids, pending_lock
+        from ..services import download_service
+        from ..database import db, models
+        
+        last_clipboard_bvids = []
+        last_download_state = None
+        
+        while True:
+            if await request.is_disconnected():
+                break
+                
+            # 1. 剪贴板状态检测
+            with pending_lock:
+                current_bvids = list(pending_bvids)
+            if current_bvids != last_clipboard_bvids:
+                last_clipboard_bvids = current_bvids
+                if current_bvids:
+                    # 通知前端有新的剪贴板数据
+                    yield f"event: clipboard_pending\ndata: {json.dumps({'count': len(current_bvids)})}\n\n"
+            
+            # 2. 下载状态检测
+            try:
+                # 使用瞬时 session 避免长事务阻塞
+                with db.SessionLocal() as session:
+                    processing = session.query(models.Video).filter(
+                        models.Video.download_status.in_(['pending', 'downloading'])
+                    ).all()
+                    
+                    tasks = []
+                    for v in processing:
+                        tasks.append({
+                            "bvid": v.bvid,
+                            "title": v.title,
+                            "status": v.download_status,
+                            "progress": download_service.progress_cache.get(v.bvid, 0)
+                        })
+                    
+                    current_download_state = {
+                        "tasks": tasks,
+                        "queue_size": download_service.download_queue.qsize()
+                    }
+                    
+                    if current_download_state != last_download_state:
+                        last_download_state = current_download_state
+                        yield f"event: download_status\ndata: {json.dumps(current_download_state)}\n\n"
+            except Exception as e:
+                logger.error(f"SSE 下载状态查询异常: {e}")
+                
+            yield ": ping\n\n"
+            await asyncio.sleep(1)
+
+    return StreamingResponse(event_publisher(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive"})
 
 @router.post("/shutdown")
 def system_shutdown():
@@ -29,15 +88,205 @@ def system_shutdown():
 
 @router.post("/factory-reset")
 def factory_reset(db_session: Session = Depends(db.get_db), bili = Depends(get_bili)):
-    """恢复出厂设置，清空所有数据但保留默认主题的静态资源"""
+    """重置软件，清空所有数据但保留默认主题的静态资源"""
     from ..services import system_service
     try:
         system_service.execute_factory_reset(db_session, bili)
         return {"status": "success"}
     except Exception as e:
-        logger.error(f"恢复出厂设置失败: {e}")
+        logger.error(f"重置软件失败: {e}")
         db_session.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/clipboard/pending")
+def get_pending_bvids(bili = Depends(get_bili)):
+    """获取剪贴板检测到的待确认 BV 号列表（包含视频信息）"""
+    from ..services.clipboard_service import pending_bvids, pending_lock
+    with pending_lock:
+        bvids = list(pending_bvids)
+    
+    # 获取每个 BV 号的详细信息
+    videos = []
+    for bvid in bvids:
+        try:
+            # 检查是否为分集视频（格式：BV号_pN）
+            is_part = "_p" in bvid
+            if is_part:
+                clean_bvid, part_str = bvid.split("_p")
+                part_num = int(part_str)
+            else:
+                clean_bvid = bvid
+                part_num = None
+            
+            # 获取视频基本信息
+            url = f"https://api.bilibili.com/x/web-interface/view?bvid={clean_bvid}"
+            res = bili.session.get(url).json()
+            if res.get('code') == 0:
+                data = res['data']
+                
+                # 如果是分集视频，获取对应分集的信息
+                if is_part and part_num:
+                    pages = data.get('pages', [])
+                    if part_num <= len(pages):
+                        part_info = pages[part_num - 1]
+                        title = f"{data['title']} - P{part_num}: {part_info['part']}"
+                        duration = part_info['duration']
+                    else:
+                        title = f"{data['title']} - P{part_num}"
+                        duration = data['duration']
+                else:
+                    title = data['title']
+                    duration = data['duration']
+                
+                videos.append({
+                    'bvid': bvid,
+                    'title': title,
+                    'owner': data['owner']['name'],
+                    'owner_face': data['owner']['face'],
+                    'pic': data['pic'],
+                    'duration': duration,
+                    'is_part': is_part,
+                    'part_num': part_num if is_part else None,
+                    'clean_bvid': clean_bvid
+                })
+        except Exception as e:
+            logger.error(f"获取 {bvid} 信息失败: {e}")
+            # 如果获取失败，仍然返回基本信息
+            videos.append({
+                'bvid': bvid,
+                'title': '获取信息失败',
+                'owner': '未知',
+                'owner_face': '',
+                'pic': '',
+                'duration': 0,
+                'is_part': False,
+                'part_num': None,
+                'clean_bvid': bvid
+            })
+    
+    return {"videos": videos}
+
+@router.post("/clipboard/confirm")
+def confirm_bvid(request_data: dict, db_session: Session = Depends(db.get_db), bili = Depends(get_bili)):
+    """确认添加剪贴板检测到的 BV 号（仅从待确认列表移除，不直接入库）"""
+    from ..services.clipboard_service import pending_bvids, pending_lock
+    bvid = request_data.get("bvid")
+    collection_id = request_data.get("collection_id")  # 可选的媒体库 ID
+    client_title = request_data.get("title")  # 前端传入的标题（可能是用户选择的分集）
+    client_duration = request_data.get("duration")  # 前端传入的时长
+    
+    if not bvid:
+        raise HTTPException(status_code=400, detail="缺少 bvid 参数")
+    
+    # 从待确认列表中移除
+    with pending_lock:
+        if bvid in pending_bvids:
+            pending_bvids.remove(bvid)
+    
+    # 如果提供了 collection_id，则直接导入到指定媒体库
+    if collection_id:
+        try:
+            # 解析 bvid，判断是否为分集视频
+            is_part = "_p" in bvid
+            if is_part:
+                clean_bvid, part_str = bvid.split("_p")
+                part_num = int(part_str)
+            else:
+                clean_bvid = bvid
+                part_num = None
+            
+            # 获取视频信息
+            url = f"https://api.bilibili.com/x/web-interface/view?bvid={clean_bvid}"
+            res = bili.session.get(url).json()
+            
+            if res.get('code') != 0:
+                raise HTTPException(status_code=400, detail=f"无法获取视频信息: {res.get('message')}")
+            
+            bili_data = res['data']
+            
+            # 如果是分集视频，获取对应分集的信息
+            if is_part and part_num:
+                pages = bili_data.get('pages', [])
+                if part_num <= len(pages):
+                    part_info = pages[part_num - 1]
+                    title = f"{bili_data['title']} - P{part_num}: {part_info['part']}"
+                    duration = part_info['duration']
+                else:
+                    title = f"{bili_data['title']} - P{part_num}"
+                    duration = bili_data['duration']
+            else:
+                title = bili_data['title']
+                duration = bili_data['duration']
+            
+            # 优先使用前端传入的标题和时长（如果用户在预览弹窗中切换了分集）
+            if client_title:
+                title = client_title
+            if client_duration is not None:
+                duration = client_duration
+
+            # 检查视频是否已存在
+            video = db_session.query(models.Video).filter(models.Video.bvid == bvid).first()
+            if not video:
+                video = models.Video(
+                    bvid=bvid,
+                    title=title,
+                    owner=bili_data['owner']['name'],
+                    pic=bili_data['pic'],
+                    duration=duration,
+                    download_status='not_downloaded',
+                    score=5.0
+                )
+                db_session.add(video)
+            
+            # 添加到指定媒体库
+            target_col = db_session.query(models.Collection).filter(models.Collection.id == collection_id).first()
+            if not target_col:
+                raise HTTPException(status_code=404, detail="目标媒体库不存在")
+            
+            if video not in target_col.videos:
+                target_col.videos.append(video)
+            
+            db_session.commit()
+            return {"status": "success", "message": f"视频已添加到媒体库", "need_select": False}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"添加视频失败: {e}")
+            db_session.rollback()
+            raise HTTPException(status_code=500, detail=str(e))
+    else:
+        # 没有提供 collection_id，返回需要选择媒体库的标识
+        return {"status": "success", "message": "请选择媒体库", "need_select": True, "bvid": bvid}
+
+@router.post("/clipboard/dismiss")
+def dismiss_bvid(data: dict):
+    """忽略剪贴板检测到的 BV 号"""
+    from ..services.clipboard_service import pending_bvids, pending_lock
+    bvid = data.get("bvid")
+    if not bvid:
+        raise HTTPException(status_code=400, detail="缺少 bvid 参数")
+    
+    with pending_lock:
+        if bvid in pending_bvids:
+            pending_bvids.remove(bvid)
+    
+    return {"status": "success", "message": f"已忽略 {bvid}"}
+
+@router.post("/clipboard/pause")
+def pause_clipboard():
+    """暂停剪贴板监听"""
+    from ..services import clipboard_service
+    clipboard_service.is_clipboard_paused = True
+    logger.info("剪贴板监听已暂停")
+    return {"status": "success", "message": "剪贴板监听已暂停"}
+
+@router.post("/clipboard/resume")
+def resume_clipboard():
+    """恢复剪贴板监听"""
+    from ..services import clipboard_service
+    clipboard_service.is_clipboard_paused = False
+    logger.info("剪贴板监听已恢复")
+    return {"status": "success", "message": "剪贴板监听已恢复"}
 
 @router.get("/fonts")
 def get_system_fonts():
