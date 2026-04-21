@@ -44,6 +44,9 @@ def record_play(req: PlayRecordReq, db_session: Session = Depends(db.get_db)):
         if not stat:
             stat = models.DailyStat(date=today)
             db_session.add(stat)
+        
+        if stat.video_play_time is None:
+            stat.video_play_time = 0
         stat.video_play_time += req.play_duration
         
         db_session.commit()
@@ -62,6 +65,9 @@ def record_app_usage(req: AppUsageReq, db_session: Session = Depends(db.get_db))
         if not stat:
             stat = models.DailyStat(date=today)
             db_session.add(stat)
+        
+        if stat.app_usage_time is None:
+            stat.app_usage_time = 0
         stat.app_usage_time += req.duration
         db_session.commit()
         return {"code": 0, "message": "记录成功"}
@@ -79,8 +85,14 @@ def record_network_traffic(req: NetworkTrafficReq, db_session: Session = Depends
         if not stat:
             stat = models.DailyStat(date=today)
             db_session.add(stat)
+        
+        if stat.network_traffic is None:
+            stat.network_traffic = 0
         stat.network_traffic += req.traffic
+        
         if not req.is_cached:
+            if stat.uncached_traffic is None:
+                stat.uncached_traffic = 0
             stat.uncached_traffic += req.traffic
         db_session.commit()
         return {"code": 0, "message": "记录成功"}

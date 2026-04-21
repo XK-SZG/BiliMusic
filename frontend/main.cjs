@@ -28,7 +28,7 @@ function checkPortInUse(port) {
 
 // 启动 Python 后端
 async function startPythonBackend() {
-  const port = 12243
+  const port = 12280
   const isPortInUse = await checkPortInUse(port)
   
   if (isPortInUse) {
@@ -66,32 +66,36 @@ async function startPythonBackend() {
   }
 
   const logPath = path.join(app.getPath('userData'), 'backend.log')
-  fs.appendFileSync(logPath, `\n--- Starting Backend at ${new Date().toISOString()} ---\n`)
+  const startMsg = `\n${'='.repeat(60)}\n启动时间: ${new Date().toISOString()}\n后端路径: ${scriptPath}\n监听端口: ${port}\n开发模式: ${isDev}\n${'='.repeat(60)}\n`
+  fs.appendFileSync(logPath, startMsg)
+  console.log(`📝 后端日志文件: ${logPath}`)
 
   pythonProcess.stdout.on('data', (data) => {
-    const msg = `Python stdout: ${data}`
+    const msg = `[STDOUT] ${data}`
     console.log(msg)
     fs.appendFileSync(logPath, msg + '\n')
   })
 
   pythonProcess.stderr.on('data', (data) => {
-    const msg = `Python stderr: ${data}`
+    const msg = `[STDERR] ${data}`
     console.error(msg)
     fs.appendFileSync(logPath, msg + '\n')
   })
 
   pythonProcess.on('close', (code) => {
-    const msg = `Python process exited with code ${code}`
+    const msg = `[EXIT] Python process exited with code ${code} at ${new Date().toISOString()}`
     console.log(msg)
     fs.appendFileSync(logPath, msg + '\n')
     pythonProcess = null
   })
 
   pythonProcess.on('error', (err) => {
-    const msg = `Failed to start Python process: ${err}`
+    const msg = `[ERROR] Failed to start Python process: ${err.message}\nStack: ${err.stack}`
     console.error(msg)
     fs.appendFileSync(logPath, msg + '\n')
   })
+  
+  console.log(`✅ 后端进程已启动 (PID: ${pythonProcess.pid})`)
 }
 
 function createWindow() {
