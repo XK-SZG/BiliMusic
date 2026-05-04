@@ -6,8 +6,18 @@ import logging
 from threading import Thread
 from fastapi import FastAPI, Request, HTTPException
 
-from .core.log_manager import setup_memory_logger
-setup_memory_logger()
+# 初始化日志（必须在任何可能失败的导入之前）
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# 尝试加载内存日志处理器（非关键功能，失败不影响启动）
+try:
+    from .core.log_manager import setup_memory_logger
+    setup_memory_logger()
+    logger.info("内存日志处理器已加载")
+except Exception as e:
+    logger.warning(f"内存日志处理器加载失败（非关键功能）: {e}")
+
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
@@ -18,10 +28,6 @@ from . import migrate_db
 from .services import cleanup_service
 from .dependencies import bili
 from .routers import auth_router, bili_router, local_router, play_router, system_router, theme_router, download_router, stats_router
-
-# 初始化日志
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
 
 app = FastAPI(title="BiliMusic API")
 

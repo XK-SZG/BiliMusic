@@ -17,12 +17,18 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
-from ..core.log_manager import memory_handler
+# 尝试加载内存日志处理器（非关键功能，失败不影响接口）
+try:
+    from ..core.log_manager import memory_handler as _memory_handler
+except Exception:
+    _memory_handler = None
 
 @router.get("/logs")
 def get_system_logs():
     """获取系统运行日志"""
-    return {"logs": memory_handler.get_logs()}
+    if _memory_handler is not None:
+        return {"logs": _memory_handler.get_logs()}
+    return {"logs": [], "warning": "内存日志处理器未加载，请检查 log_manager.py 是否被打包"}
 
 @router.get("/events")
 async def system_events(request: Request):
