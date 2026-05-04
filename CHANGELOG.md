@@ -14,6 +14,16 @@
   - **细粒度事务提交**：对每个视频先尝试删除物理文件，删除成功后再单独执行数据库状态更新并立即 `db.commit()`；若文件被占用则跳过该视频继续处理下一个。
   - **孤立文件清理加固**：为 `_clean_orphan_files()` 中的文件删除操作添加异常捕获，防止因权限问题导致清理线程崩溃。
 
+#### 打包后后端无法启动（log_manager 模块缺失）
+- **根本原因**：
+ - `backend/core/log_manager.py` 虽然通过 `backend/main.py` 显式导入，但 `--windowed` 模式下 `logging.basicConfig()` 与模块初始化时序冲突，且该模块未被 PyInstaller 的 `hiddenimports` 列表声明。
+ - `backend/main.py` 中对 `log_manager` 的导入放在 `logging.basicConfig()` 之前，且无任何容错处理，模块初始化失败直接导致 `from backend.main import app` 失败，后端进程静默崩溃。
+- **修复方案**：
+ - `backend/main.py`：将 `logging.basicConfig()` 提前到所有可能失败的导入之前，对 `log_manager` 导入添加 `try-except` 容错。
+ - `backend/routers/system.py`：对 `memory_handler` 导入添加容错，模块缺失时 `/api/system/logs` 返回空日志数组和警告信息。
+ - `build.bat`：添加 `--hidden-import backend.core.log_manager`
+ - `backend.spec`：`hiddenimports` 列表添加 `'backend.core.log_manager'`
+
 ### ✨ 新功能 (New Features)
 
 #### 内置日志控制台
