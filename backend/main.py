@@ -5,6 +5,9 @@ import os
 import logging
 from threading import Thread
 from fastapi import FastAPI, Request, HTTPException
+
+from .core.log_manager import setup_memory_logger
+setup_memory_logger()
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles

@@ -34,6 +34,7 @@ export function initSSE(onClipboardPending, onDownloadStatus) {
 }
 
 export default {
+  getLogs: () => request.get('/system/logs'),
   getFonts: () => request.get('/system/fonts'),
   uploadFont: (formData) => request.post('/system/fonts/upload', formData, {
     headers: { 'Content-Type': 'multipart/form-data' }

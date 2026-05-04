@@ -53,34 +53,63 @@ def _clean_orphan_files():
                 bvid = bvid_match.group(1)
                 if bvid not in all_videos_in_db:
                     file_path = os.path.join(DOWNLOAD_PATH, filename)
-                    os.remove(file_path)
-                    logging.info(f"清理孤立文件: {filename}")
+                    try:
+                        os.remove(file_path)
+                        logging.info(f"清理孤立文件: {filename}")
+                    except Exception as e:
+                        logging.warning(f"清理孤立文件失败 {filename}: {e}")
 
 
 def _enforce_cache_limit():
     """清理最旧的文件以满足缓存上限"""
     logging.info("开始检查缓存大小...")
-    total_size = sum(os.path.getsize(os.path.join(DOWNLOAD_PATH, f)) for f in os.listdir(DOWNLOAD_PATH))
-
-    if total_size <= CACHE_LIMIT_BYTES:
-        logging.info("缓存大小正常")
-        return
-
-    logging.info(f"缓存超限 ({total_size / 1024 ** 3:.2f}GB > {CACHE_LIMIT_BYTES / 1024 ** 3:.2f}GB)，开始清理...")
+    
     with get_thread_safe_db_session() as db:
         # 获取所有已下载的视频，按添加时间升序（最旧的在前）
         videos_to_prune = db.query(Video).filter(Video.download_status == 'completed').order_by(
             Video.added_at.asc()).all()
 
-        for video in videos_to_prune:
+        total_size = 0
+        valid_videos = []
+        for v in videos_to_prune:
+            if v.local_path and os.path.exists(v.local_path):
+                try:
+                    size = os.path.getsize(v.local_path)
+                    total_size += size
+                    valid_videos.append((v, size))
+                except Exception as e:
+                    logging.warning(f"无法获取文件大小 {v.local_path}: {e}")
+
+        if total_size <= CACHE_LIMIT_BYTES:
+            logging.info("缓存大小正常")
+            return
+
+        logging.info(f"缓存超限 ({total_size / 1024 ** 3:.2f}GB > {CACHE_LIMIT_BYTES / 1024 ** 3:.2f}GB)，开始清理...")
+
+        for video, file_size in valid_videos:
             if total_size <= CACHE_LIMIT_BYTES:
                 break
 
-            if video.local_path and os.path.exists(video.local_path):
-                file_size = os.path.getsize(video.local_path)
-                os.remove(video.local_path)
-                video.download_status = 'not_downloaded'
-                video.local_path = None
+            local_path_copy = video.local_path
+            bvid = video.bvid
+            title = video.title
+            
+            # 先尝试删除物理文件，因为在 Windows 上文件可能被播放器占用导致删除失败
+            try:
+                os.remove(local_path_copy)
+            except Exception as e:
+                logging.warning(f"文件删除失败 (可能被占用)，跳过清理 {title}: {e}")
+                continue
+            
+            # 文件删除成功后，再更新数据库状态
+            try:
+                db.query(Video).filter(Video.bvid == bvid).update({
+                    "download_status": "not_downloaded",
+                    "local_path": None
+                })
+                db.commit()
                 total_size -= file_size
-                logging.info(f"清理旧缓存: {video.title}")
-        db.commit()
+                logging.info(f"清理旧缓存: {title}")
+            except Exception as e:
+                logging.error(f"更新数据库失败 {title}: {e}")
+                db.rollback()

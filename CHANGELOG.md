@@ -2,6 +2,42 @@
 
 所有对本项目的显著更改都将记录在此文件中。
 
+## [1.0.18] - 2026-05-04
+
+### 🐛 致命缺陷修复 (Critical Bug Fix)
+
+#### 缓存清理导致视频幽灵化（状态与数据不一致）
+- **根本原因**：`cleanup_service.py` 的 `_enforce_cache_limit()` 函数在清理超限缓存文件时，将所有数据库更新操作放入一个大事务中，仅在最外层执行一次 `db.commit()`。当循环删除多个视频文件时，若某个文件被播放器或系统占用导致 `os.remove()` 抛出异常，异常会触发数据库回滚（`db.rollback()`），导致异常前已成功删除的物理文件无法恢复，但其对应的数据库状态更新也被一并回滚，形成"文件已删除，数据库仍标记为 completed"的幽灵视频。
+
+- **修复方案**：
+  - **解耦文件删除与数据库更新**：将 `os.remove()` 放入独立的 `try...except` 块，文件删除失败时仅记录警告并跳过该视频，不中断整体清理流程。
+  - **细粒度事务提交**：对每个视频先尝试删除物理文件，删除成功后再单独执行数据库状态更新并立即 `db.commit()`；若文件被占用则跳过该视频继续处理下一个。
+  - **孤立文件清理加固**：为 `_clean_orphan_files()` 中的文件删除操作添加异常捕获，防止因权限问题导致清理线程崩溃。
+
+### ✨ 新功能 (New Features)
+
+#### 内置日志控制台
+- **后端日志拦截器**（`backend/core/log_manager.py`）：
+  - 实现基于内存环形队列的 `MemoryLogHandler`（容量 500 条），自动捕获 INFO/WARNING/ERROR 等所有级别日志。
+  - 在应用启动时自动注册（`backend/main.py` 导入即激活）。
+- **API 接口**（`backend/routers/system.py`）：
+  - 新增 `GET /api/system/logs` 接口，返回格式化日志数据。
+- **前端可视化面板**（`frontend/src/views/Settings.vue`）：
+  - 在系统设置页新增"系统日志"导航项与专属面板。
+  - 支持点击"刷新日志"实时获取并展示后端日志。
+  - 日志按时间倒序排列，支持错误（红色）、警告（黄色）、信息（蓝色）等级着色。
+  - 为 `frontend/src/api/system.js` 新增 `getLogs()` 方法。
+
+### 🔧 受影响文件
+- `backend/services/cleanup_service.py` — 重构 `_enforce_cache_limit()` 和 `_clean_orphan_files()`
+- `backend/core/log_manager.py` — 新增日志管理器
+- `backend/main.py` — 引入内存日志处理器
+- `backend/routers/system.py` — 新增 `/api/system/logs` 接口
+- `frontend/src/api/system.js` — 新增 `getLogs()` API 方法
+- `frontend/src/views/Settings.vue` — 新增系统日志面板
+
+---
+
 ## [1.0.17] - 2026-04-21
 
 ### 🐛 Bug 修复 (Bug Fixes)

@@ -65,6 +65,32 @@ const appVersion = __APP_VERSION__
 const systemFonts = ref([])
 const isScanningFonts = ref(false)
 
+const systemLogs = ref([])
+const isFetchingLogs = ref(false)
+
+async function fetchSystemLogs() {
+  isFetchingLogs.value = true
+  try {
+    const data = await systemApi.getLogs()
+    if (data.logs) {
+      systemLogs.value = data.logs.reverse() // 最新日志在最上面
+    }
+  } catch (e) {
+    store.showToast("获取日志失败", "error")
+  } finally {
+    isFetchingLogs.value = false
+  }
+}
+
+function formatLogTime(timeStr) {
+  try {
+    const date = new Date(timeStr)
+    return date.toLocaleString()
+  } catch (e) {
+    return timeStr
+  }
+}
+
 // 搜索功能
 const searchQuery = ref('')
 const searchResults = ref([])
@@ -86,7 +112,8 @@ const navItems = [
   { name: '算法实验室', id: 'section-algorithm', icon: ScaleIcon, keywords: ['算法', '播放', '模式', 'algorithm', 'mode'] },
   { name: '基础音量', id: 'section-volume', icon: SpeakerWaveIcon, keywords: ['音量', '声音', '音频', 'volume', 'sound'] },
   { name: '数据同步', id: 'section-sync', icon: CircleStackIcon, keywords: ['同步', '备份', '数据', 'sync', 'backup'] },
-  { name: '关于软件', id: 'section-about', icon: InformationCircleIcon, keywords: ['关于', '版本', '信息', 'about', 'version'] }
+  { name: '关于软件', id: 'section-about', icon: InformationCircleIcon, keywords: ['关于', '版本', '信息', 'about', 'version'] },
+  { name: '系统日志', id: 'section-logs', icon: CommandLineIcon, keywords: ['日志', '控制台', '错误', 'log', 'console', 'error'] }
 ]
 
 // 搜索逻辑
@@ -1775,7 +1802,43 @@ async function executeFactoryReset() {
         </div>
       </section>
 
-      <!-- 13. 关于软件 -->
+      <!-- 13. 系统日志 -->
+      <section id="section-logs" class="bg-white/50 dark:bg-gray-900/40 backdrop-blur-md rounded-[2.5rem] p-8 border border-gray-100 dark:border-white/5 shadow-sm">
+        <div class="flex items-center justify-between mb-8">
+          <div class="flex items-center gap-5">
+            <div class="p-4 bg-gray-500/10 text-gray-500 rounded-[1.5rem]"><CommandLineIcon class="w-7 h-7" /></div>
+            <div>
+              <h3 class="text-xl font-bold text-gray-800 dark:text-white">系统日志</h3>
+              <p class="text-sm text-gray-400 mt-1">查看软件运行时的后台日志信息</p>
+            </div>
+          </div>
+          <button @click="fetchSystemLogs" :disabled="isFetchingLogs" class="px-4 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-xl text-xs font-bold transition shadow-md shadow-gray-500/30 active:scale-95 flex items-center gap-2 disabled:opacity-50">
+            <ArrowPathIcon v-if="isFetchingLogs" class="w-4 h-4 animate-spin" />
+            <ArrowPathIcon v-else class="w-4 h-4" />
+            刷新日志
+          </button>
+        </div>
+
+        <div class="bg-gray-900 rounded-2xl p-4 overflow-hidden flex flex-col h-[400px]">
+          <div v-if="systemLogs.length === 0" class="flex-1 flex items-center justify-center text-gray-500 text-sm font-bold">
+            暂无日志数据，请点击刷新
+          </div>
+          <div v-else class="flex-1 overflow-y-auto scrollbar-thin font-mono text-xs space-y-1 pr-2">
+            <div v-for="(log, idx) in systemLogs" :key="idx" class="flex gap-3 hover:bg-white/5 px-2 py-1 rounded">
+              <span class="text-gray-500 shrink-0">[{{ formatLogTime(log.time) }}]</span>
+              <span class="shrink-0 w-12" :class="{
+                'text-red-400': log.level === 'ERROR' || log.level === 'CRITICAL',
+                'text-yellow-400': log.level === 'WARNING',
+                'text-blue-400': log.level === 'INFO',
+                'text-gray-400': log.level === 'DEBUG'
+              }">{{ log.level }}</span>
+              <span class="text-gray-300 break-all">{{ log.message }}</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 14. 关于软件 -->
       <section id="section-about" class="bg-white/50 dark:bg-gray-900/40 backdrop-blur-md rounded-[2.5rem] p-8 border border-gray-100 dark:border-white/5 shadow-sm mb-12">
         <div class="flex items-center gap-5 mb-8">
           <div class="p-4 bg-emerald-500/10 text-emerald-500 rounded-[1.5rem]"><InformationCircleIcon class="w-7 h-7" /></div>

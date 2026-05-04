@@ -17,6 +17,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
+from ..core.log_manager import memory_handler
+
+@router.get("/logs")
+def get_system_logs():
+    """获取系统运行日志"""
+    return {"logs": memory_handler.get_logs()}
+
 @router.get("/events")
 async def system_events(request: Request):
     """SSE 全局事件总线（替代前端轮询）"""
