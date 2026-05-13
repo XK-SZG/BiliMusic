@@ -8,7 +8,7 @@ echo.
 echo [1/3] 正在打包 Python 后端 (PyInstaller)...
 call .venv\Scripts\activate
 python -m pip install pyinstaller
-python -m PyInstaller --noconfirm --onefile --windowed --name backend --distpath dist/backend --add-data "backend/data;data" --add-data "config.yaml;." --hidden-import uvicorn --hidden-import fastapi --hidden-import starlette --hidden-import pydantic --hidden-import sqlalchemy --hidden-import sqlite3 --hidden-import mutagen --hidden-import pyperclip --hidden-import backend.core.log_manager --exclude-module matplotlib --exclude-module numpy --exclude-module tkinter --exclude-module PyQt5 --exclude-module PySide6 --exclude-module IPython --exclude-module jupyter --exclude-module scipy --exclude-module pandas run_backend.py
+python -m PyInstaller --noconfirm --onefile --console --name backend --distpath dist/backend --add-data "backend/data;data" --add-data "config.yaml;." --hidden-import uvicorn --hidden-import fastapi --hidden-import starlette --hidden-import pydantic --hidden-import sqlalchemy --hidden-import sqlite3 --hidden-import mutagen --hidden-import pyperclip --hidden-import backend.core.log_manager --hidden-import anyio --hidden-import httpx --hidden-import yaml --hidden-import requests --hidden-import python_multipart --hidden-import cachetools --hidden-import yt_dlp --hidden-import qrcode --hidden-import PIL --hidden-import multiprocessing --exclude-module matplotlib --exclude-module numpy --exclude-module tkinter --exclude-module PyQt5 --exclude-module PySide6 --exclude-module IPython --exclude-module jupyter --exclude-module scipy --exclude-module pandas run_backend.py
 if %errorlevel% neq 0 (
     echo 后端打包失败�?
     pause

@@ -16,8 +16,8 @@ tests/
 # 在项目根目录运行
 python run_backend.py
 ```
+后端应该在 `http://127.0.0.1:12180` 上运行。
 
-后端应该在 `http://127.0.0.1:12243` 上运行。
 
 ### 1.2 安装测试依赖
 ```bash
@@ -66,7 +66,7 @@ BiliMusic 后端 API 简单测试
 这个脚本会自动从数据库获取真实的 BVID，避免大量 404 错误：
 
 ```bash
-locust -f tests/realistic_load_test.py --host=http://127.0.0.1:12243
+locust -f tests/realistic_load_test.py --host=http://127.0.0.1:12180
 ```
 
 ### 3.2 启动 Locust Web UI
@@ -74,10 +74,10 @@ locust -f tests/realistic_load_test.py --host=http://127.0.0.1:12243
 
 ```bash
 # 使用真实数据（推荐）
-locust -f tests/realistic_load_test.py --host=http://127.0.0.1:12243
+locust -f tests/realistic_load_test.py --host=http://127.0.0.1:12180
 
 # 或使用随机数据（会有较多 404）
-locust -f tests/load_test.py --host=http://127.0.0.1:12243
+locust -f tests/load_test.py --host=http://127.0.0.1:12180
 ```
 
 然后在浏览器中打开 `http://localhost:8089`，你会看到 Locust 的 Web 界面。
@@ -85,7 +85,7 @@ locust -f tests/load_test.py --host=http://127.0.0.1:12243
 **配置参数：**
 - **Number of users (peak concurrency)**: 并发用户数，建议从 10 开始
 - **Spawn rate (users started/second)**: 每秒增加的用户数，建议 2-5
-- **Host**: 已自动填充为 `http://127.0.0.1:12243`
+- **Host**: 已自动填充为 `http://127.0.0.1:12180`
 
 点击 "Start swarming" 开始压测。
 
@@ -94,11 +94,11 @@ locust -f tests/load_test.py --host=http://127.0.0.1:12243
 
 ```bash
 # 使用真实数据：50 个用户，每秒增加 5 个，持续 60 秒
-locust -f tests/realistic_load_test.py --host=http://127.0.0.1:12243 \
+locust -f tests/realistic_load_test.py --host=http://127.0.0.1:12180 \
   --users 50 --spawn-rate 5 --run-time 60s --headless
 
 # 使用随机数据：100 个用户（会有较多 404）
-locust -f tests/load_test.py --host=http://127.0.0.1:12243 \
+locust -f tests/load_test.py --host=http://127.0.0.1:12180 \
   --users 100 --spawn-rate 10 --run-time 60s --headless
 ```
 
@@ -112,13 +112,13 @@ locust -f tests/load_test.py --host=http://127.0.0.1:12243 \
 
 #### 场景 1: 高并发流媒体代理测试
 ```bash
-locust -f tests/load_test.py --host=http://127.0.0.1:12243 \
+locust -f tests/load_test.py --host=http://127.0.0.1:12180 \
   HighConcurrencyScenario --users 50 --spawn-rate 10 --run-time 120s --headless
 ```
 
 #### 场景 2: 下载队列压测（测试断路器）
 ```bash
-locust -f tests/load_test.py --host=http://127.0.0.1:12243 \
+locust -f tests/load_test.py --host=http://127.0.0.1:12180 \
   DownloadQueueScenario --users 20 --spawn-rate 5 --run-time 60s --headless
 ```
 
@@ -159,13 +159,13 @@ POST     /api/system/download/[bvid]     234         0     |      23       8    
 ### Q1: 运行 `python tests/load_test.py` 没有任何输出
 **A**: Locust 脚本不能直接用 Python 运行，必须使用 `locust` 命令：
 ```bash
-locust -f tests/load_test.py --host=http://127.0.0.1:12243
+locust -f tests/load_test.py --host=http://127.0.0.1:12180
 ```
 
 ### Q2: 提示 "Connection refused" 或 "无法连接"
 **A**: 后端服务未启动或端口不正确。请检查：
 1. 运行 `python run_backend.py` 启动后端
-2. 确认后端监听在 `127.0.0.1:12243`
+2. 确认后端监听在 `127.0.0.1:12180`
 3. 检查防火墙设置
 
 ### Q3: 压测时出现大量 500 错误
@@ -195,7 +195,7 @@ locust -f tests/load_test.py --host=http://127.0.0.1:12243
 
 ### 7.1 生成 HTML 报告
 ```bash
-locust -f tests/load_test.py --host=http://127.0.0.1:12243 \
+locust -f tests/load_test.py --host=http://127.0.0.1:12180 \
   --users 100 --spawn-rate 10 --run-time 60s --headless \
   --html=report.html
 ```
@@ -203,7 +203,7 @@ locust -f tests/load_test.py --host=http://127.0.0.1:12243 \
 ### 7.2 分布式压测（多机）
 在主机上：
 ```bash
-locust -f tests/load_test.py --master --host=http://127.0.0.1:12243
+locust -f tests/load_test.py --master --host=http://127.0.0.1:12180
 ```
 
 在工作机上：
@@ -213,7 +213,7 @@ locust -f tests/load_test.py --worker --master-host=<主机IP>
 
 ### 7.3 自定义日志级别
 ```bash
-locust -f tests/load_test.py --host=http://127.0.0.1:12243 --loglevel DEBUG
+locust -f tests/load_test.py --host=http://127.0.0.1:12180 --loglevel DEBUG
 ```
 
 ## 八、参考资源

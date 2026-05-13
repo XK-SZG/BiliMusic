@@ -20,7 +20,7 @@ if __name__ == "__main__":
     multiprocessing.freeze_support()
     
     parser = argparse.ArgumentParser(description="Run BiliMusic Backend Server")
-    parser.add_argument("--port", type=int, default=12243, help="Port to run the server on")
+    parser.add_argument("--port", type=int, default=12180, help="Port to run the server on")
     parser.add_argument("--no-browser", action="store_true", help="Do not automatically open the browser")
     parser.add_argument("--with-titlebar", action="store_true", help="Force show custom titlebar in browser")
     

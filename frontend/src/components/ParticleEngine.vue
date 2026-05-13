@@ -187,7 +187,7 @@ watch(() => settingsStore.settings.particleCustomUrls, (urls) => {
   if (!urls || urls.length === 0) return
   urls.forEach(url => {
     const img = new Image()
-    img.src = url.startsWith('/api') ? `http://127.0.0.1:12243${url}` : url
+    img.src = url.startsWith('/api') ? `http://127.0.0.1:12180${url}` : url
     customImages.push(img)
   })
 }, { immediate: true })

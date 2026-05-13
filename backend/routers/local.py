@@ -6,7 +6,7 @@ import tempfile
 import zipfile
 import io
 import logging
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.responses import FileResponse
 from sqlalchemy import or_
@@ -322,6 +322,7 @@ class ExportLibraryReq(BaseModel):
     export_type: str
     export_queue: bool = True
     queue_data: list = []
+    save_path: Optional[str] = None
 
 def remove_temp_file(path: str):
     try:
@@ -337,24 +338,52 @@ from ..services import backup_service
 
 @router.post("/api/library/export")
 def export_library(req: ExportLibraryReq, background_tasks: BackgroundTasks, db_session: Session = Depends(db.get_db)):
+    temp_path = None
     try:
+        # FastAPI 期望能够访问文件直到响应完成
+        # 由于 FileResponse 会在后台异步传输文件，此时如果在 background_tasks 里移除文件，会由于竞态条件导致找不到文件
+        # 因此不再用 background_tasks，利用 fastapi.responses.FileResponse 的 background 参数处理清理工作
         temp_path = backup_service.export_library_to_zip(
             db_session=db_session,
             export_library=req.export_library,
             collection_ids=req.collection_ids,
             export_type=req.export_type,
             export_queue=req.export_queue,
-            queue_data=req.queue_data
+            queue_data=req.queue_data,
+            save_path=req.save_path
         )
-        background_tasks.add_task(backup_service.remove_temp_file, temp_path)
+        
+        if req.save_path:
+            return {"status": "success", "path": temp_path}
+            
+        # 定义带有清理动作的函数
+        def _cleanup():
+            if temp_path:
+                backup_service.remove_temp_file(temp_path)
+            
+        background_tasks.add_task(_cleanup)
         return FileResponse(
             temp_path,
             media_type="application/zip",
-            filename=f"BiliMusic_Backup_{uuid.uuid4().hex[:8]}.zip"
+            filename=f"BiliMusic_Backup_{uuid.uuid4().hex[:8]}.zip",
+            background=background_tasks
         )
-    except Exception as e:
-        logger.error(f"导出媒体库失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except BaseException as e:
+        import traceback
+        logger.error(f"导出媒体库发生全局异常: {type(e).__name__} - {e}")
+        logger.error(f"全局异常堆栈: {traceback.format_exc()}")
+        # 优化点 3：防泄漏生命周期管理 (第二级防御)
+        # 路由层面的异常接管，确保在打包过程中发生异常时，如果 temp_path 已生成，也能被清理
+        if temp_path and not req.save_path:
+            backup_service.remove_temp_file(temp_path)
+        elif temp_path and req.save_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+        if isinstance(e, Exception):
+            raise HTTPException(status_code=500, detail=str(e))
+        raise e
 
 @router.post("/api/library/import/analyze")
 async def analyze_library_import(file: UploadFile = File(...), db_session: Session = Depends(db.get_db)):

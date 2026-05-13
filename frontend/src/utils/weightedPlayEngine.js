@@ -54,15 +54,6 @@ export class WeightedPlayEngine {
 
     this.isBuilt = true
 
-    // 开发模式下输出调试信息
-    if (import.meta.env.DEV) {
-      console.log('[权重引擎] 预计算完成:', {
-        队列长度: queue.length,
-        有效项数: this.validIndices.length,
-        总权重: this.totalWeight.toFixed(2),
-        历史过滤: recentHistory.length
-      })
-    }
   }
 
   /**

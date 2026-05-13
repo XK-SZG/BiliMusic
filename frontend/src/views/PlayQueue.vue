@@ -531,9 +531,9 @@ function handleContextMenuSelect(item) {
         </div>
       </div>
       
-      <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 relative" :class="{'z-50': showFilterPopover}">
         <p class="text-gray-500 font-medium italic shrink-0">即将播放: {{ filteredQueue.length }} 首曲目</p>
-        <div class="flex items-center gap-3 bg-white/50 dark:bg-gray-800/40 backdrop-blur-md p-2 rounded-2xl border border-gray-100 dark:border-white/5 shadow-sm relative self-start md:self-auto overflow-x-auto scrollbar-none" :class="{'z-50': showFilterPopover}">
+        <div class="flex items-center gap-3 bg-white/50 dark:bg-gray-800/40 backdrop-blur-md p-2 rounded-2xl border border-gray-100 dark:border-white/5 shadow-sm self-start md:self-auto overflow-x-auto scrollbar-none">
           <div class="relative group shrink-0"><MagnifyingGlassIcon class="w-4 h-4 absolute left-3 top-3 text-gray-400" /><input v-model="searchQuery" placeholder="搜索标题或UP..." class="bg-gray-100 dark:bg-white/5 border-none rounded-xl pl-9 pr-4 py-2.5 text-xs font-bold focus:ring-2 focus:ring-primary-500 w-32 sm:w-40 md:w-64 transition-all" /></div>
           <label v-if="isFilterActive" class="flex items-center gap-2 cursor-pointer text-xs font-bold text-gray-500 hover:text-primary-500 transition px-2 whitespace-nowrap shrink-0">
             <input type="checkbox" v-model="hideUnmatched" class="rounded border-gray-300 text-primary-500 shadow-sm focus:border-primary-300 focus:ring focus:ring-primary-200 focus:ring-opacity-50 w-4 h-4 transition-all">
@@ -542,36 +542,36 @@ function handleContextMenuSelect(item) {
           <div class="h-8 w-px bg-gray-200 dark:bg-white/10 mx-1 shrink-0"></div>
           <!-- 为了避免 absolute 浮窗撑开外部容器导致布局闪烁，将其直接放置在具有确切定位上下文的父级 -->
           <div class="shrink-0">
-          <button @click="toggleFilterPopover" :class="activeFilters.length > 0 ? 'text-primary-500 bg-primary-500/10' : 'text-gray-400 hover:bg-gray-100 dark:hover:bg-white/5'" class="p-2.5 rounded-xl transition-all flex items-center gap-2 text-[14px] font-black uppercase whitespace-nowrap">
-            <AdjustmentsHorizontalIcon class="w-4 h-4 shrink-0" /><span class="hidden md:inline">高级筛选</span><span v-if="activeFilters.length > 0" class="ml-1 w-4 h-4 bg-primary-500 text-white rounded-full flex items-center justify-center text-[8px]">{{ activeFilters.length }}</span>
-          </button>
-          <transition name="dropdown">
-            <div v-if="showFilterPopover" @click.stop class="absolute top-full right-0 mt-3 w-80 sm:w-[26rem] z-[100] bg-white dark:bg-gray-900 rounded-[2rem] shadow-2xl border border-gray-100 dark:border-white/10 overflow-hidden backdrop-blur-2xl">
-              <div class="p-6">
-                <div class="flex items-center justify-between mb-5"><h4 class="text-sm font-black text-gray-400 uppercase tracking-[0.2em]">活跃筛选器</h4><button v-if="activeFilters.length > 0" @click="activeFilters = []" class="text-xs font-bold text-primary-500 hover:underline">全部清除</button></div>
-                <div class="space-y-3 mb-6 max-h-80 overflow-y-auto scrollbar-thin pr-1">
-                  <div v-for="(filter, index) in activeFilters" :key="index" class="flex flex-col gap-2 p-4 rounded-2xl border transition-all group/f" :class="filter.isEnabled ? 'bg-gray-50 dark:bg-white/5 border-transparent shadow-sm' : 'bg-gray-100/50 dark:bg-black/20 border-transparent opacity-50'">
-                    <div class="flex items-center gap-3">
-                      <button @click="toggleFilterProperty(index, 'isEnabled')" class="w-10 h-10 rounded-xl flex items-center justify-center transition-colors" :class="filter.isEnabled ? 'bg-blue-500 text-white shadow-lg shadow-blue-500/30' : 'bg-gray-200 dark:bg-white/10 text-gray-400'"><PowerIcon class="w-5 h-5" /></button>
-                      <button @click="toggleFilterProperty(index, 'logic')" class="px-2.5 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-tighter transition-all" :class="filter.logic === 'AND' ? 'bg-indigo-500/20 text-indigo-500 border border-indigo-500/20' : 'bg-orange-500/20 text-orange-500 border border-orange-500/20'">{{ filter.logic === 'AND' ? '且' : '或' }}</button>
-                      <button @click="toggleFilterProperty(index, 'isNegative')" class="w-10 h-10 rounded-xl flex items-center justify-center transition-colors" :class="filter.isNegative ? 'bg-red-500/10 text-red-500' : 'bg-green-500/10 text-green-500'"><ArrowsRightLeftIcon class="w-5 h-5" /></button>
-                      <div class="flex-1 min-w-0"><div class="text-xs font-black uppercase text-gray-400 mb-0.5 tracking-wider">{{ filter.label }}</div><div class="text-sm font-bold truncate text-gray-700 dark:text-gray-200 leading-tight">{{ filter.displayValue }}</div></div>
-                      <div class="flex items-center gap-1 opacity-0 group-hover/f:opacity-100 transition-opacity">
-                        <button v-if="filter.id !== 'local'" @click="openFilterConfig(filter.id, true, index)" class="p-2 text-gray-400 hover:text-blue-500"><PencilSquareIcon class="w-5 h-5" /></button>
-                        <button @click="removeFilter(index)" class="p-2 text-gray-400 hover:text-red-500"><TrashIcon class="w-5 h-5" /></button>
-                      </div>
-                    </div>
-                  </div>
-                  <div v-if="activeFilters.length === 0" class="py-10 text-center opacity-30"><FunnelIcon class="w-8 h-8 mx-auto mb-2" /><p class="text-[12px] font-bold uppercase tracking-widest">暂无筛选条件</p></div>
-                </div>
-                <div class="border-t border-gray-100 dark:border-white/5 pt-4"><p class="text-[12px] font-black text-gray-400 uppercase tracking-widest mb-3 px-1">添加筛选维度</p>
-                  <div class="grid grid-cols-2 gap-2"><button v-for="type in filterTypes" :key="type.id" @click="openFilterConfig(type.id)" class="flex items-center gap-2 px-3 py-2 bg-gray-50 dark:bg-white/5 hover:bg-primary-500/10 hover:text-primary-500 rounded-xl transition-all text-left group/add"><component :is="type.icon" class="w-3.5 h-3.5 text-gray-400 group-hover/add:text-primary-500" /><span class="text-[12px] font-bold">{{ type.label }}</span></button></div>
-                </div>
-                </div>
-              </div>
-            </transition>
+            <button @click="toggleFilterPopover" :class="activeFilters.length > 0 ? 'text-primary-500 bg-primary-500/10' : 'text-gray-400 hover:bg-gray-100 dark:hover:bg-white/5'" class="p-2.5 rounded-xl transition-all flex items-center gap-2 text-[14px] font-black uppercase whitespace-nowrap">
+              <AdjustmentsHorizontalIcon class="w-4 h-4 shrink-0" /><span class="hidden md:inline">高级筛选</span><span v-if="activeFilters.length > 0" class="ml-1 w-4 h-4 bg-primary-500 text-white rounded-full flex items-center justify-center text-[8px]">{{ activeFilters.length }}</span>
+            </button>
           </div>
         </div>
+        <transition name="dropdown">
+          <div v-if="showFilterPopover" @click.stop class="absolute top-full right-0 mt-3 w-80 sm:w-[26rem] z-[100] bg-white dark:bg-gray-900 rounded-[2rem] shadow-2xl border border-gray-100 dark:border-white/10 overflow-hidden backdrop-blur-2xl">
+            <div class="p-6">
+              <div class="flex items-center justify-between mb-5"><h4 class="text-sm font-black text-gray-400 uppercase tracking-[0.2em]">活跃筛选器</h4><button v-if="activeFilters.length > 0" @click="activeFilters = []" class="text-xs font-bold text-primary-500 hover:underline">全部清除</button></div>
+              <div class="space-y-3 mb-6 max-h-80 overflow-y-auto scrollbar-thin pr-1">
+                <div v-for="(filter, index) in activeFilters" :key="index" class="flex flex-col gap-2 p-4 rounded-2xl border transition-all group/f" :class="filter.isEnabled ? 'bg-gray-50 dark:bg-white/5 border-transparent shadow-sm' : 'bg-gray-100/50 dark:bg-black/20 border-transparent opacity-50'">
+                  <div class="flex items-center gap-3">
+                    <button @click="toggleFilterProperty(index, 'isEnabled')" class="w-10 h-10 rounded-xl flex items-center justify-center transition-colors" :class="filter.isEnabled ? 'bg-blue-500 text-white shadow-lg shadow-blue-500/30' : 'bg-gray-200 dark:bg-white/10 text-gray-400'"><PowerIcon class="w-5 h-5" /></button>
+                    <button @click="toggleFilterProperty(index, 'logic')" class="px-2.5 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-tighter transition-all" :class="filter.logic === 'AND' ? 'bg-indigo-500/20 text-indigo-500 border border-indigo-500/20' : 'bg-orange-500/20 text-orange-500 border border-orange-500/20'">{{ filter.logic === 'AND' ? '且' : '或' }}</button>
+                    <button @click="toggleFilterProperty(index, 'isNegative')" class="w-10 h-10 rounded-xl flex items-center justify-center transition-colors" :class="filter.isNegative ? 'bg-red-500/10 text-red-500' : 'bg-green-500/10 text-green-500'"><ArrowsRightLeftIcon class="w-5 h-5" /></button>
+                    <div class="flex-1 min-w-0"><div class="text-xs font-black uppercase text-gray-400 mb-0.5 tracking-wider">{{ filter.label }}</div><div class="text-sm font-bold truncate text-gray-700 dark:text-gray-200 leading-tight">{{ filter.displayValue }}</div></div>
+                    <div class="flex items-center gap-1 opacity-0 group-hover/f:opacity-100 transition-opacity">
+                      <button v-if="filter.id !== 'local'" @click="openFilterConfig(filter.id, true, index)" class="p-2 text-gray-400 hover:text-blue-500"><PencilSquareIcon class="w-5 h-5" /></button>
+                      <button @click="removeFilter(index)" class="p-2 text-gray-400 hover:text-red-500"><TrashIcon class="w-5 h-5" /></button>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="activeFilters.length === 0" class="py-10 text-center opacity-30"><FunnelIcon class="w-8 h-8 mx-auto mb-2" /><p class="text-[12px] font-bold uppercase tracking-widest">暂无筛选条件</p></div>
+              </div>
+              <div class="border-t border-gray-100 dark:border-white/5 pt-4"><p class="text-[12px] font-black text-gray-400 uppercase tracking-widest mb-3 px-1">添加筛选维度</p>
+                <div class="grid grid-cols-2 gap-2"><button v-for="type in filterTypes" :key="type.id" @click="openFilterConfig(type.id)" class="flex items-center gap-2 px-3 py-2 bg-gray-50 dark:bg-white/5 hover:bg-primary-500/10 hover:text-primary-500 rounded-xl transition-all text-left group/add"><component :is="type.icon" class="w-3.5 h-3.5 text-gray-400 group-hover/add:text-primary-500" /><span class="text-[12px] font-bold">{{ type.label }}</span></button></div>
+              </div>
+            </div>
+          </div>
+        </transition>
       </div>
     </div>
 

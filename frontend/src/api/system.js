@@ -4,7 +4,7 @@ import request from './request'
 export function initSSE(onClipboardPending, onDownloadStatus) {
   const isDev = window.location.port === '5173' || window.location.port === '3000'
   const isElectron = window.location.protocol === 'file:'
-  const API_BASE = import.meta.env.VITE_API_URL || (isDev || isElectron ? 'http://127.0.0.1:12280/api' : `${window.location.origin}/api`)
+  const API_BASE = import.meta.env.VITE_API_URL || (isDev || isElectron ? 'http://127.0.0.1:12180/api' : `${window.location.origin}/api`)
   
   const eventSource = new EventSource(`${API_BASE}/system/events`)
   
@@ -53,6 +53,7 @@ export default {
     headers: { 'Content-Type': 'multipart/form-data' }
   }),
   shutdown: () => request.post('/system/shutdown'),
+  sleep: () => request.post('/system/sleep'),
   factoryReset: () => request.post('/system/factory-reset'),
   getDownloadStatus: () => request.get('/download/status'),
   getPendingBvids: () => request.get('/system/clipboard/pending'),
@@ -63,7 +64,7 @@ export default {
   addToDownload: (bvid, quality) => request.post(`/download/add/${bvid}`, null, { params: { quality } }),
   cancelDownload: (bvid) => request.post(`/download/cancel/${bvid}`),
   cancelAllDownloads: () => request.post('/download/cancel-all'),
-  exportLibrary: (req) => request.post('/library/export', req, { responseType: 'blob' }),
+  exportLibrary: (req) => request.post('/library/export', req, { responseType: req.save_path ? 'json' : 'blob', timeout: 0 }),
   analyzeImport: (formData) => request.post('/library/import/analyze', formData, {
     headers: { 'Content-Type': 'multipart/form-data' }
   }),

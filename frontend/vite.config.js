@@ -17,9 +17,14 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify(packageJson.version)
   },
   server: {
-    port: 5173,
+    host: '127.0.0.1',
+    port: 3000,
+    strictPort: true,
     // 自动打开浏览器
     open: false
+  },
+  optimizeDeps: {
+    include: ['echarts', 'axios', 'vue', 'vue-router', 'pinia']
   },
   build: {
     rollupOptions: {

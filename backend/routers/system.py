@@ -99,6 +99,16 @@ def system_shutdown():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/sleep")
+def system_sleep():
+    """执行系统休眠指令"""
+    from ..services import system_service
+    try:
+        system_service.execute_system_sleep()
+        return {"status": "success", "message": "指令已发送"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/factory-reset")
 def factory_reset(db_session: Session = Depends(db.get_db), bili = Depends(get_bili)):
     """重置软件，清空所有数据但保留默认主题的静态资源"""

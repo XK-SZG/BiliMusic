@@ -275,10 +275,8 @@ async function loadPlaySchedule() {
     
     // 任务 3.2：加载智能分析
     const analysisRes = await statsApi.getPlayScheduleAnalysis()
-    console.log('[Statistics] 智能分析接口返回:', analysisRes)
     if (analysisRes.code === 0) {
       scheduleAnalysis.value = analysisRes.data
-      console.log('[Statistics] 智能分析数据已设置:', scheduleAnalysis.value)
     } else {
       console.error('[Statistics] 智能分析接口返回错误:', analysisRes)
     }
@@ -365,8 +363,6 @@ async function handleImageError(event, originalPic) {
     imageRetryCount.value[key]++
     imageDownloading.value[key] = true
     
-    console.log(`[Statistics] 封面加载失败，第 ${imageRetryCount.value[key]} 次尝试让后端下载:`, key)
-    
     const success = await downloadCover(originalPic)
     imageDownloading.value[key] = false
     
@@ -377,7 +373,6 @@ async function handleImageError(event, originalPic) {
       }, 500)
     } else {
       if (imageRetryCount.value[key] >= 3) {
-        console.log('[Statistics] 封面下载重试3次均失败，使用默认封面:', key)
         img.src = DEFAULT_COVER
       } else {
          // 没成功，但还没到3次，让它再次触发 error 事件
@@ -387,7 +382,6 @@ async function handleImageError(event, originalPic) {
       }
     }
   } else {
-    console.log('[Statistics] 封面下载失败，使用默认封面:', key)
     img.src = DEFAULT_COVER
   }
 }

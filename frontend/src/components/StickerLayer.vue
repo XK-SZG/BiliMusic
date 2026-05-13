@@ -154,7 +154,7 @@ onUnmounted(() => {
        ]"
        :style="(props.target === 'sidebar' && settingsStore.settings.sidebarPosition === 'right') ? { transform: 'scaleX(-1)' } : {}">
     <img v-for="s in activeStickers" :key="s.id"
-         :src="themeStore.stickerDataBundle[s.url] || (s.url.startsWith('http') ? s.url : `http://127.0.0.1:12243${s.url}`)"
+         :src="themeStore.stickerDataBundle[s.url] || (s.url.startsWith('http') ? s.url : `http://127.0.0.1:12180${s.url}`)"
          :style="getStickerStyle(s)"
          @load="onImageLoad(s.url)"
          @error="onImageError(s.url)"

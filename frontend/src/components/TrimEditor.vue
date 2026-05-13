@@ -28,9 +28,9 @@ const videoUrl = computed(() => {
   const v = store.localVideos.find(i => i.bvid === props.bvid)
   if (v && v.download_status !== 'completed') {
     // 未缓存视频使用流媒体 API 预览
-    return `http://127.0.0.1:12243/api/play/stream/${props.bvid}?quality=${settingsStore.settings.streamQuality}`
+    return `http://127.0.0.1:12180/api/play/stream/${props.bvid}?quality=${settingsStore.settings.streamQuality}`
   }
-  return `http://127.0.0.1:12243/downloads/${props.bvid}.mp4`
+  return `http://127.0.0.1:12180/downloads/${props.bvid}.mp4`
 })
 
 // 初始化加载
@@ -126,8 +126,8 @@ const fmt = (t) => {
         <button @click="emit('close')" class="text-gray-400 hover:text-gray-600 dark:hover:text-white transition font-bold">关闭</button>
       </div>
       
-      <div class="relative bg-black aspect-video group">
-        <video ref="videoRef" :src="videoUrl" class="w-full h-full object-contain" 
+      <div class="relative bg-black aspect-video group max-h-[50vh]">
+        <video ref="videoRef" :src="videoUrl" class="w-full h-full object-contain"
                @timeupdate="onTimeUpdate" @loadedmetadata="onLoadedMetadata" @canplay="onCanPlay" @ended="isPlaying=false"></video>
         
         <!-- 控制层 -->

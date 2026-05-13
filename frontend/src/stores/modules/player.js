@@ -12,7 +12,7 @@ import statsApi from '../../api/stats'
 
 const isDev = window.location.port === '5173' || window.location.port === '3000'
 const isElectron = window.location.protocol === 'file:'
-const API_BASE = import.meta.env.VITE_API_URL || (isDev || isElectron ? 'http://127.0.0.1:12280/api' : `${window.location.origin}/api`)
+const API_BASE = import.meta.env.VITE_API_URL || (isDev || isElectron ? 'http://127.0.0.1:12180/api' : `${window.location.origin}/api`)
 
 export const usePlayerStore = defineStore('player', {
   state: () => ({
@@ -61,7 +61,7 @@ export const usePlayerStore = defineStore('player', {
       target: 0,
       current: 0
     })),
-    autoShutdown: localStorage.getItem('player_auto_shutdown') === 'true',
+    autoActionType: localStorage.getItem('player_auto_action') || 'none',
     userReacted: false,
     _lastTime: null,
     _lastSeekTime: 0,
@@ -78,7 +78,6 @@ export const usePlayerStore = defineStore('player', {
 
     async init() {
       const themeStore = useThemeStore()
-      console.log("[Player Init] 开始初始化...");
       themeStore.applyTheme()
 
       // Load from IndexedDB
@@ -204,7 +203,6 @@ export const usePlayerStore = defineStore('player', {
         
         // 登录状态变化时清除缓存
         if (!wasLoggedIn && isNowLoggedIn) {
-          console.log('[checkLogin] 检测到新登录，清除收藏夹缓存')
           localStorage.removeItem('cache_bili_folders')
           this.biliFolders = []
         }
@@ -240,7 +238,6 @@ export const usePlayerStore = defineStore('player', {
       const MAX_RETRIES = 3
       try {
         const data = await biliApi.getFolders()
-        console.log('[fetchBiliFolders] API 响应:', data)
         if (data.code === 0) {
           if (data.data && data.data.length === 0 && retryCount < MAX_RETRIES) {
             // 返回空数组，可能是缓存问题，重试
@@ -250,7 +247,6 @@ export const usePlayerStore = defineStore('player', {
           }
           this.biliFolders = data.data.map(f => ({ ...f, cover: this.formatImg(f.cover || f.pic) }))
           localStorage.setItem('cache_bili_folders', JSON.stringify(this.biliFolders))
-          console.log('[fetchBiliFolders] 成功获取收藏夹:', this.biliFolders.length, '个')
           if (this.biliFolders.length === 0) {
             this.showToast('收藏夹列表为空，请确认是否有收藏内容', 'info')
           }
@@ -382,7 +378,6 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async updateVideoScore(bvid, score, metadata = null) {
-      console.log(`[Store] Updating score for ${bvid}: ${score}`);
       try {
         const params = { score }
         // 自动提取元数据以支持后端自动归档逻辑
@@ -733,13 +728,27 @@ export const usePlayerStore = defineStore('player', {
       await this._saveQueue()
     },
 
-    async next() {
+    async next(isAuto = false) {
       this.userReacted = false // 重置当前播放歌曲的点赞/点踩状态
       if (this.playQueue.length === 0) return
       const hasFilter = this.filteredQueueIndices.length > 0 && this.filteredQueueIndices.length < this.playQueue.length
-      if (this.lengthControl.enabled && this.lengthControl.type === 'count' && this.lengthControl.target > 0) {
-        this.lengthControl.current++; if (this.lengthControl.current >= this.lengthControl.target) { this._advanceIndexOnly(); this._handleAutoStop("已达到预设数量"); return }
+      
+      if (this.lengthControl.enabled) {
+        if (this.lengthControl.type === 'count' && this.lengthControl.target > 0) {
+          this.lengthControl.current++;
+          if (this.lengthControl.current >= this.lengthControl.target) {
+            this._advanceIndexOnly();
+            this._handleAutoStop("已达到预设数量");
+            return
+          }
+        } else if (this.lengthControl.type === 'time' && this.lengthControl.target > 0) {
+          if (this.lengthControl.current >= this.lengthControl.target) {
+            this._handleAutoStop("已达到预设播放时长");
+            return
+          }
+        }
       }
+
       if (this.playMode === 'single_loop') { this._loadAndPlay(); return }
       let nextIdx = -1; const pool = hasFilter ? this.filteredQueueIndices : this.playQueue.map((_, i) => i)
       if (this.playMode.startsWith('shuffle')) {
@@ -829,7 +838,6 @@ export const usePlayerStore = defineStore('player', {
         // 开发模式下输出权重分布
         if (import.meta.env.DEV) {
           const distribution = this._weightEngine.getWeightDistribution(effectiveQueue)
-          console.log('[权重播放] 权重分布:', distribution.slice(0, 10)) // 仅显示前 10 个
         }
       }
       
@@ -895,9 +903,51 @@ export const usePlayerStore = defineStore('player', {
       }
     },
 
-    _handleAutoStop(reason) { 
-      this.isPlaying = false; if (this.audioElement) this.audioElement.pause(); 
-      this.showToast(reason, "info"); this.lengthControl.current = 0; 
+    _handleAutoStop(reason) {
+      this.isPlaying = false; if (this.audioElement) this.audioElement.pause();
+      this.showToast(reason, "info");
+      this.lengthControl.current = 0;
+      this.lengthControl.enabled = false;
+      
+      if (this.autoActionType !== 'none' && !this.showShutdownWarning) {
+        const timeout = parseInt(localStorage.getItem('player_auto_action_timeout') || '180', 10);
+        this.startShutdownCountdown(timeout);
+      }
+    },
+
+    startShutdownCountdown(seconds = 180) {
+      if (this.shutdownTimer) clearInterval(this.shutdownTimer);
+      this.shutdownTimeLeft = seconds;
+      this.showShutdownWarning = true;
+      
+      if (window.require) {
+        const { ipcRenderer } = window.require('electron');
+        ipcRenderer.send('force-focus-window');
+      }
+      
+      this.shutdownTimer = setInterval(() => {
+        this.shutdownTimeLeft--;
+        if (this.shutdownTimeLeft <= 0) {
+          clearInterval(this.shutdownTimer);
+          this.shutdownTimer = null;
+          this.showShutdownWarning = false;
+          this.executeShutdown();
+        }
+      }, 1000);
+    },
+
+    cancelShutdown() {
+      if (this.shutdownTimer) {
+        clearInterval(this.shutdownTimer);
+        this.shutdownTimer = null;
+      }
+      this.showShutdownWarning = false;
+      this.autoShutdown = false;
+      localStorage.setItem('player_auto_shutdown', 'false');
+      if (window.require) {
+        const { ipcRenderer } = window.require('electron');
+        ipcRenderer.send('cancel-force-focus');
+      }
     },
 
     _loadAndPlay(resumeTime = null) {
@@ -1009,6 +1059,7 @@ export const usePlayerStore = defineStore('player', {
         if (!this._lastTime) this._lastTime = Date.now()
         const now = Date.now(); const deltaMin = (now - this._lastTime) / 1000 / 60
         this.lengthControl.current += deltaMin; this._lastTime = now
+        
         if (this.lengthControl.current >= this.lengthControl.target) this._handleAutoStop("已达到预设播放时长")
       } else this._lastTime = null
     },
@@ -1071,7 +1122,7 @@ export const usePlayerStore = defineStore('player', {
     },
     async executeShutdown() {
       try {
-        await axios.post(`${API_BASE}/system/shutdown`)
+        await systemApi.shutdown()
       } catch (e) {
         this.showToast("系统关机指令发送失败", "error")
       }

@@ -112,8 +112,8 @@ const navItems = [
   { name: '算法实验室', id: 'section-algorithm', icon: ScaleIcon, keywords: ['算法', '播放', '模式', 'algorithm', 'mode'] },
   { name: '基础音量', id: 'section-volume', icon: SpeakerWaveIcon, keywords: ['音量', '声音', '音频', 'volume', 'sound'] },
   { name: '数据同步', id: 'section-sync', icon: CircleStackIcon, keywords: ['同步', '备份', '数据', 'sync', 'backup'] },
-  { name: '关于软件', id: 'section-about', icon: InformationCircleIcon, keywords: ['关于', '版本', '信息', 'about', 'version'] },
-  { name: '系统日志', id: 'section-logs', icon: CommandLineIcon, keywords: ['日志', '控制台', '错误', 'log', 'console', 'error'] }
+  { name: '系统日志', id: 'section-logs', icon: CommandLineIcon, keywords: ['日志', '控制台', '错误', 'log', 'console', 'error'] },
+  { name: '关于软件', id: 'section-about', icon: InformationCircleIcon, keywords: ['关于', '版本', '信息', 'about', 'version'] }
 ]
 
 // 搜索逻辑
@@ -203,7 +203,7 @@ async function handleFontUpload(e) {
     const data = await systemApi.uploadFont(formData)
     if (data.status === 'success') {
       const fontName = data.filename.split('.')[0]
-      const fontFace = new FontFace(fontName, `url(http://127.0.0.1:12243${data.url})`)
+      const fontFace = new FontFace(fontName, `url(http://127.0.0.1:12180${data.url})`)
       await fontFace.load()
       document.fonts.add(fontFace)
       settingsStore.updateSettings({ uiFontFamily: 'custom', uiFontCustom: fontName })
@@ -359,7 +359,7 @@ async function handleThemeImport(e) {
 
 function exportTheme(id) {
   store.showToast('正在打包主题资源...', 'info')
-  window.open(`http://127.0.0.1:12243/api/themes/export/${id}`, '_blank')
+  window.open(`http://127.0.0.1:12180/api/themes/export/${id}`, '_blank')
 }
 
 function getThemeColor(t) {
@@ -530,18 +530,15 @@ const exportSettings = reactive({
   exportLibrary: true,
   exportQueue: true,
   type: 'data', // data, full
-  selectedCollections: [],
-  isExporting: false
+  selectedCollections: []
 })
 
-function handleExportLibrary() {
+async function handleExportLibrary() {
   if (!exportSettings.exportLibrary && !exportSettings.exportQueue) {
     store.showToast('请至少选择一项要导出的内容', 'error')
     return
   }
   
-  exportSettings.isExporting = true
-  store.showToast('正在打包资源，大型图库可能需要较长时间，请耐心等待...', 'info')
   const payload = {
     export_library: exportSettings.exportLibrary,
     collection_ids: exportSettings.selectedCollections.length === 0 ? ['all'] : exportSettings.selectedCollections,
@@ -549,20 +546,44 @@ function handleExportLibrary() {
     export_queue: exportSettings.exportQueue,
     queue_data: exportSettings.exportQueue ? store.playQueue : []
   }
+
+  if (window.require) {
+    const { ipcRenderer } = window.require('electron')
+    try {
+      const savePath = await ipcRenderer.invoke('show-save-dialog', {
+        title: '导出媒体库',
+        defaultPath: 'BiliMusic_Backup.zip',
+        filters: [{ name: 'ZIP Archives', extensions: ['zip'] }]
+      })
+      if (!savePath) {
+        return // 用户取消了保存
+      }
+      payload.save_path = savePath
+    } catch (e) {
+      console.error('获取保存路径失败:', e)
+    }
+  }
+
+  settingsStore.isExportingLibrary = true
+  store.showToast('正在打包资源，大型图库可能需要较长时间，请耐心等待...', 'info')
   
   systemApi.exportLibrary(payload)
     .then(data => {
-      const url = window.URL.createObjectURL(new Blob([data]))
-      const link = document.createElement('a')
-      link.href = url
-      link.setAttribute('download', `BiliMusic_Backup.zip`)
-      document.body.appendChild(link)
-      link.click()
-      link.remove()
-      store.showToast('媒体库导出成功', 'success')
+      if (payload.save_path) {
+        store.showToast('媒体库导出成功', 'success')
+      } else {
+        const url = window.URL.createObjectURL(new Blob([data]))
+        const link = document.createElement('a')
+        link.href = url
+        link.setAttribute('download', `BiliMusic_Backup.zip`)
+        document.body.appendChild(link)
+        link.click()
+        link.remove()
+        store.showToast('媒体库导出成功', 'success')
+      }
     })
     .catch(err => store.showToast('导出失败', 'error'))
-    .finally(() => { exportSettings.isExporting = false })
+    .finally(() => { settingsStore.isExportingLibrary = false })
 }
 
 const importState = reactive({
@@ -936,7 +957,7 @@ async function executeFactoryReset() {
                    </label>
                  </span>
                  <div class="mt-2 h-20 bg-gray-50 dark:bg-black/20 rounded-xl flex items-center justify-center border border-gray-200 dark:border-white/10 relative overflow-hidden">
-                   <img v-if="editThemeData.cardImage" :src="`http://127.0.0.1:12243${editThemeData.cardImage}`" @error="(e) => e.target.style.display='none'" class="h-full object-contain drop-shadow-md" />
+                   <img v-if="editThemeData.cardImage" :src="`http://127.0.0.1:12180${editThemeData.cardImage}`" @error="(e) => e.target.style.display='none'" class="h-full object-contain drop-shadow-md" />
                    <div v-else class="text-[10px] text-gray-400 font-bold uppercase tracking-widest">使用默认样式</div>
                    <button v-if="editThemeData.cardImage" @click="editThemeData.cardImage = ''" class="absolute right-2 top-2 p-1 bg-red-500 text-white rounded-md shadow hover:bg-red-600 transition"><TrashIcon class="w-3 h-3" /></button>
                  </div>
@@ -1001,7 +1022,7 @@ async function executeFactoryReset() {
                  :style="{ backgroundColor: getThemeColor(t) }"></div>
 
             <!-- 卡片左下角图像 -->
-            <img v-if="t.settings.cardImage" :src="`http://127.0.0.1:12243${t.settings.cardImage}`"
+            <img v-if="t.settings.cardImage" :src="`http://127.0.0.1:12180${t.settings.cardImage}`"
                  @error="(e) => e.target.style.display = 'none'"
                  class="absolute bottom-0 left-0 object-contain drop-shadow-lg opacity-40 group-hover:opacity-100 transition-all pointer-events-none"
                  :style="{ width: `${t.settings.cardImageSize || 50}%`, transform: `translate(${t.settings.cardOffsetX ?? -10}%, ${t.settings.cardOffsetY ?? 10}%)` }" />
@@ -1158,7 +1179,7 @@ async function executeFactoryReset() {
                 <div class="flex flex-col lg:flex-row lg:items-center gap-6">
                   <!-- 缩略图 -->
                   <div class="w-full lg:w-24 h-24 bg-gray-100 dark:bg-black/40 rounded-lg overflow-hidden shrink-0 flex items-center justify-center p-2 border border-gray-200 dark:border-white/5">
-                    <img :src="`http://127.0.0.1:12243${s.url}`" @error="(e) => e.target.style.display='none'" class="max-w-full max-h-full object-contain drop-shadow-md" />
+                    <img :src="`http://127.0.0.1:12180${s.url}`" @error="(e) => e.target.style.display='none'" class="max-w-full max-h-full object-contain drop-shadow-md" />
                   </div>
                   <!-- 控制器：改为垂直排列以支持输入框 -->
                   <div class="flex-1 flex flex-col gap-4 w-full">
@@ -1596,7 +1617,7 @@ async function executeFactoryReset() {
                        @click="toggleBgSelection(bg.name)"
                        class="group relative aspect-video rounded-2xl overflow-hidden border-2 transition-all cursor-pointer bg-black min-w-[120px]"
                        :class="selectedBgNames.includes(bg.name) ? 'border-emerald-500 ring-4 ring-emerald-500/20' : 'border-gray-200 dark:border-white/5'">
-                    <img :src="`http://127.0.0.1:12243${bg.url}`" @error="(e) => e.target.style.display='none'" class="w-full h-full object-cover transition-all duration-500"
+                    <img :src="`http://127.0.0.1:12180${bg.url}`" @error="(e) => e.target.style.display='none'" class="w-full h-full object-cover transition-all duration-500"
                          :class="selectedBgNames.includes(bg.name) ? 'scale-110 opacity-100' : 'opacity-70 group-hover:opacity-100'" />
                     <div class="absolute top-2 left-2 w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all"
                          :class="selectedBgNames.includes(bg.name) ? 'bg-emerald-500 border-emerald-500' : 'bg-black/20 border-white/50'">
@@ -1651,6 +1672,17 @@ async function executeFactoryReset() {
             <div class="flex justify-between items-center"><span class="text-sm font-bold text-gray-600 dark:text-gray-300">沉浸模式自动隐藏 UI 延迟 ({{ settingsStore.settings.idleTimeout || 3 }}s)</span></div>
             <input type="range" min="1" max="10" step="1" :value="settingsStore.settings.idleTimeout || 3" @input="(e) => settingsStore.updateSettings({idleTimeout: parseInt(e.target.value)})" class="w-full h-1.5 bg-gray-200 dark:bg-white/10 rounded-full appearance-none accent-rose-500" />
             <p class="text-[10px] text-gray-400 italic">控制鼠标空闲多久后自动隐藏光标与控件</p>
+          </div>
+
+          <!-- 自动关机/休眠倒计时 -->
+          <div class="flex flex-col gap-4">
+            <div class="flex justify-between items-center"><span class="text-sm font-bold text-gray-600 dark:text-gray-300">自动关机/休眠倒计时 ({{ Math.floor((settingsStore.settings.autoActionTimeout || 180) / 60) }} 分钟)</span></div>
+            <input type="range" min="60" max="1800" step="60" :value="settingsStore.settings.autoActionTimeout || 180" @input="(e) => {
+              const val = parseInt(e.target.value);
+              settingsStore.updateSettings({autoActionTimeout: val});
+              localStorage.setItem('player_auto_action_timeout', val.toString());
+            }" class="w-full h-1.5 bg-gray-200 dark:bg-white/10 rounded-full appearance-none accent-rose-500" />
+            <p class="text-[10px] text-gray-400 italic">触发自动关机或休眠时的确认倒计时长度</p>
           </div>
         </div>
       </section>
@@ -1747,10 +1779,10 @@ async function executeFactoryReset() {
                   </div>
                 </div>
                 
-                <button @click="handleExportLibrary" :disabled="exportSettings.isExporting" class="mt-2 w-full py-3 bg-cyan-500 hover:bg-cyan-600 text-white rounded-2xl font-black shadow-lg shadow-cyan-500/30 transition active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
-                  <ArrowPathIcon v-if="exportSettings.isExporting" class="w-5 h-5 animate-spin" />
+                <button @click="handleExportLibrary" :disabled="settingsStore.isExportingLibrary" class="mt-2 w-full py-3 bg-cyan-500 hover:bg-cyan-600 text-white rounded-2xl font-black shadow-lg shadow-cyan-500/30 transition active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
+                  <ArrowPathIcon v-if="settingsStore.isExportingLibrary" class="w-5 h-5 animate-spin" />
                   <ArrowDownTrayIcon v-else class="w-5 h-5" />
-                  {{ exportSettings.isExporting ? '正在打包压缩 (可能需要数分钟)...' : '立即生成并下载 ZIP' }}
+                  {{ settingsStore.isExportingLibrary ? '正在打包压缩 (可能需要数分钟)...' : '立即生成并下载 ZIP' }}
                 </button>
              </div>
           </div>

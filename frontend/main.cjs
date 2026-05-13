@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell } = require('electron')
+const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron')
 const path = require('path')
 const { spawn } = require('child_process')
 const fs = require('fs')
@@ -28,7 +28,7 @@ function checkPortInUse(port) {
 
 // 启动 Python 后端
 async function startPythonBackend() {
-  const port = 12280
+  const port = 12180
   const isPortInUse = await checkPortInUse(port)
   
   if (isPortInUse) {
@@ -61,7 +61,8 @@ async function startPythonBackend() {
     scriptPath = path.join(process.resourcesPath, 'backend', 'backend.exe')
     console.log('Starting Python backend in prod mode:', scriptPath)
     pythonProcess = spawn(scriptPath, [port.toString()], {
-      cwd: path.join(process.resourcesPath, 'backend')
+      cwd: path.join(process.resourcesPath, 'backend'),
+      windowsHide: true
     })
   }
 
@@ -119,7 +120,7 @@ function createWindow() {
 
   if (isDev) {
     // 开发环境下，加载 Vite 开发服务器
-    mainWindow.loadURL('http://localhost:5173')
+    mainWindow.loadURL('http://localhost:3000')
     mainWindow.webContents.openDevTools()
   } else {
     // 生产环境下，加载打包后的 index.html
@@ -244,6 +245,26 @@ function createWindow() {
       target: exePath,
       description: 'BiliMusic - A Bilibili Music Player'
     })
+  })
+
+  ipcMain.on('force-focus-window', () => {
+    if (mainWindow) {
+      mainWindow.setAlwaysOnTop(true, 'screen-saver')
+      mainWindow.show()
+      mainWindow.focus()
+    }
+  })
+
+  ipcMain.on('cancel-force-focus', () => {
+    if (mainWindow) {
+      // 恢复原来的 alwaysOnTop 状态（如果是 mini 模式则保持 true）
+      mainWindow.setAlwaysOnTop(isMiniMode)
+    }
+  })
+
+  ipcMain.handle('show-save-dialog', async (event, options) => {
+    const result = await dialog.showSaveDialog(mainWindow, options)
+    return result.canceled ? null : result.filePath
   })
 }
 

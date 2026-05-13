@@ -27,7 +27,7 @@ const ParticleEngine = defineAsyncComponent(() => import('./components/ParticleE
 const CollectionSelectModal = defineAsyncComponent(() => import('./components/CollectionSelectModal.vue'))
 const VideoPreviewModal = defineAsyncComponent(() => import('./components/VideoPreviewModal.vue'))
 
-import { SparklesIcon, ArrowRightOnRectangleIcon, UserIcon, MusicalNoteIcon, SpeakerWaveIcon, SpeakerXMarkIcon } from '@heroicons/vue/24/solid'
+import { SparklesIcon, ArrowRightOnRectangleIcon, UserIcon, MusicalNoteIcon, SpeakerWaveIcon, SpeakerXMarkIcon, PowerIcon } from '@heroicons/vue/24/solid'
 import { ICON_ANNUAL_VIP } from './assets/icons'
 
 const store = usePlayerStore()
@@ -157,15 +157,6 @@ async function handleClipboardConfirm(selectedVideoInfo) {
     // 保留 from_clipboard 标记
     clipboardVideo.value = { ...selectedVideoInfo, from_clipboard: true }
     clipboardBvid.value = selectedVideoInfo.bvid
-    console.log('[剪贴板] 用户选择的分集信息:', {
-      bvid: selectedVideoInfo.bvid,
-      title: selectedVideoInfo.title,
-      duration: selectedVideoInfo.duration,
-      is_part: selectedVideoInfo.is_part,
-      part_num: selectedVideoInfo.part_num
-    })
-    console.log('[剪贴板] 更新后的 clipboardVideo:', clipboardVideo.value)
-    console.log('[剪贴板] 更新后的 clipboardBvid:', clipboardBvid.value)
   }
   
   if (!clipboardBvid.value) return
@@ -507,7 +498,7 @@ watch(() => settingsStore.settings.videoFitMode, () => { syncVideoElement() })
            crossorigin="anonymous"
            playsinline
            webkit-playsinline
-           @ended="store.next()"></video>
+           @ended="store.next(true)"></video>
     
     <!-- 预加载视频元素（用于剪贴板预览缓存） -->
     <video ref="preloadVideoRef"
@@ -558,6 +549,18 @@ watch(() => settingsStore.settings.videoFitMode, () => { syncVideoElement() })
 
     <!-- 用户协议弹窗 -->
     <AgreementModal :show="showAgreementModal" @agree="handleAgree" @decline="handleDecline" />
+
+    <!-- 关机预警弹窗 -->
+    <transition name="toast-fade">
+      <div v-if="store.showShutdownWarning" style="-webkit-app-region: no-drag;" class="fixed top-24 left-1/2 -translate-x-1/2 z-[10000] flex items-center gap-4 bg-red-500/90 backdrop-blur-md px-6 py-3 rounded-2xl shadow-2xl border border-red-400 pointer-events-auto">
+        <PowerIcon class="w-6 h-6 text-white animate-pulse" />
+        <div class="flex flex-col">
+          <span class="text-white text-sm font-black tracking-widest">系统即将{{ store.autoActionType === 'sleep' ? '休眠' : '关机' }}</span>
+          <span class="text-white/90 text-xs font-bold">倒计时: {{ Math.floor(store.shutdownTimeLeft / 60) }}:{{ (store.shutdownTimeLeft % 60).toString().padStart(2, '0') }}</span>
+        </div>
+        <button @click="store.cancelShutdown()" style="-webkit-app-region: no-drag;" class="ml-4 px-4 py-2 bg-white text-red-500 rounded-xl text-xs font-black shadow-md hover:scale-105 transition-all active:scale-95 cursor-pointer">取消</button>
+      </div>
+    </transition>
 
     <!-- 窗口标题栏 (置于最顶层) -->
     <TitleBar v-if="showTitleBar" class="z-[9999]" />
@@ -642,5 +645,13 @@ img {
 
 .animate-shimmer-down {
   animation: shimmer-down 0.6s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+@keyframes slide-down {
+  from { transform: translateY(-100%); }
+  to { transform: translateY(0); }
+}
+.animate-slide-down {
+  animation: slide-down 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 </style>

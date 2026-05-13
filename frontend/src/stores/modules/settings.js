@@ -11,6 +11,7 @@ export const useSettingsStore = defineStore('settings', {
     settings: JSON.parse(localStorage.getItem('bili_settings')) || DEFAULT_SETTINGS,
     isMiniMode: localStorage.getItem('is_mini_mode') === 'true',
     idleTimeout: 3,
+    isExportingLibrary: false,
   }),
   actions: {
     updateSettings(newSettings) {

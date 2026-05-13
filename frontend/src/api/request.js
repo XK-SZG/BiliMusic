@@ -2,9 +2,7 @@ import axios from 'axios'
 
 const isDev = window.location.port === '5173' || window.location.port === '3000'
 const isElectron = window.location.protocol === 'file:'
-const API_BASE = import.meta.env.VITE_API_URL || (isDev || isElectron ? 'http://127.0.0.1:12280/api' : `${window.location.origin}/api`)
-
-console.log('[API Config] 环境检测:', { isDev, isElectron, API_BASE })
+const API_BASE = import.meta.env.VITE_API_URL || (isDev || isElectron ? 'http://127.0.0.1:12180/api' : `${window.location.origin}/api`)
 
 const service = axios.create({
   baseURL: API_BASE,
@@ -14,7 +12,6 @@ const service = axios.create({
 // 请求拦截器 - 添加日志
 service.interceptors.request.use(
   config => {
-    console.log(`[API Request] ${config.method?.toUpperCase()} ${config.url}`, config.params || config.data)
     return config
   },
   error => {
@@ -26,7 +23,6 @@ service.interceptors.request.use(
 // 响应拦截器
 service.interceptors.response.use(
   response => {
-    console.log(`[API Response] ${response.config.url}`, response.data)
     return response.data
   },
   error => {

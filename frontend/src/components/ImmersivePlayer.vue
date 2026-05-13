@@ -85,7 +85,6 @@ async function detectBrightness() {
 }
 
 watch(() => store.isBuffering, (buffering) => {
-  console.log("[加载状态] Buffering 变化 ->", buffering);
   if (buffering) {
     // 延迟 100ms 检测，确保视频帧已在内存中
     setTimeout(detectBrightness, 100)
@@ -181,7 +180,7 @@ const videoContainerStyle = computed(() => {
 const bgImageStyle = computed(() => {
   let url = ''
   if (settingsStore.settings.bgType === 'custom' && themeStore.customBgUrl) {
-    url = `http://127.0.0.1:12243${themeStore.customBgUrl}`
+    url = `http://127.0.0.1:12180${themeStore.customBgUrl}`
   } else {
     url = store.currentVideo ? store.formatImg(store.currentVideo.pic) : ''
   }

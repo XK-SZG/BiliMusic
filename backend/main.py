@@ -2,241 +2,254 @@
 # Path: backend/main.py
 
 import os
+import sys
 import logging
+from datetime import datetime
 from threading import Thread
 from fastapi import FastAPI, Request, HTTPException
+
+# ============================================================
+# 🔴 DIAGNOSTIC PROBE — direct file write, bypasses logging entirely
+# ============================================================
+_DIAG_LOG = os.environ.get('BILIMUSIC_CRASH_LOG', '')
+
+def _diag(msg):
+    """Write a diagnostic message directly to the crash log file with immediate flush.
+    This bypasses the logging system entirely to avoid deadlocks or buffering issues."""
+    try:
+        if _DIAG_LOG:
+            with open(_DIAG_LOG, 'a', encoding='utf-8') as f:
+                f.write(f"[{datetime.now().isoformat()}] main.py DIAG: {msg}\n")
+                f.flush()
+    except:
+        pass
+
+_diag("Entering backend/main.py module-level code")
 
 # 初始化日志（必须在任何可能失败的导入之前）
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+_diag("logging.basicConfig() done")
 
 # 尝试加载内存日志处理器（非关键功能，失败不影响启动）
 try:
+    _diag("Importing log_manager...")
     from .core.log_manager import setup_memory_logger
+    _diag("log_manager imported, calling setup...")
     setup_memory_logger()
     logger.info("内存日志处理器已加载")
+    _diag("log_manager setup complete")
 except Exception as e:
     logger.warning(f"内存日志处理器加载失败（非关键功能）: {e}")
+    _diag(f"log_manager FAILED: {e}")
 
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.base import BaseHTTPMiddleware
+from contextlib import asynccontextmanager
 
+_diag("Importing .core.paths ...")
+from .core.paths import DATA_DIR, BASE_DIR
+_diag(".core.paths imported")
+
+_diag("Importing .core.config ...")
+from .core.config import get_config
+_diag(".core.config imported")
+
+_diag("Importing .database ...")
 from .database import models, db
-from . import migrate_db
-from .services import cleanup_service
-from .dependencies import bili
-from .routers import auth_router, bili_router, local_router, play_router, system_router, theme_router, download_router, stats_router
+_diag(".database imported")
 
-app = FastAPI(title="BiliMusic API")
+_diag("Importing .routers ...")
+from .routers import auth, bili, local, play, system, theme, stats, download
+_diag(".routers imported")
 
-def verify_completed_downloads(db_session, download_path):
-    """
-    [性能优化] 启动时校验所有 completed 状态的视频文件
-    使用分页查询避免大数据量时的内存占用和启动延迟
-    """
-    from sqlalchemy import func
-    
-    # 先统计总数
-    total_count = db_session.query(func.count(models.Video.bvid)).filter(
-        models.Video.download_status == 'completed',
-        models.Video.is_local != 1  # 排除本地导入的文件
-    ).scalar()
-    
-    if total_count == 0:
-        logger.info("[启动校验] 无需校验的下载文件")
-        return
-    
-    logger.info(f"[启动校验] 开始校验 {total_count} 个已下载文件...")
-    
-    reset_count = 0
-    fixed_count = 0
-    page_size = 100  # 每次处理 100 条
-    
-    # [性能优化] 分页查询，避免一次性加载所有数据
-    for offset in range(0, total_count, page_size):
-        videos = db_session.query(models.Video).filter(
-            models.Video.download_status == 'completed',
-            models.Video.is_local != 1
-        ).limit(page_size).offset(offset).all()
-        
-        for video in videos:
-            # 1. 如果 local_path 存在且文件存在，跳过
-            if video.local_path and os.path.exists(video.local_path):
-                # 检查文件大小
-                if os.path.getsize(video.local_path) < 0.5 * 1024 * 1024:
-                    logger.warning(f"[启动校验] 文件过小，重置状态: {video.bvid}")
-                    video.download_status = 'not_downloaded'
-                    video.local_path = None
-                    reset_count += 1
-                continue
-            
-            # 2. 如果 local_path 为空或文件不存在，尝试查找文件
-            expected_path = os.path.join(download_path, f"{video.bvid}.mp4")
-            
-            if os.path.exists(expected_path):
-                # 检查文件大小
-                if os.path.getsize(expected_path) < 0.5 * 1024 * 1024:
-                    logger.warning(f"[启动校验] 文件过小，重置状态: {video.bvid}")
-                    video.download_status = 'not_downloaded'
-                    video.local_path = None
-                    reset_count += 1
-                else:
-                    # 文件在默认位置，更新 local_path
-                    if not video.local_path:
-                        video.local_path = expected_path
-                        fixed_count += 1
-            else:
-                # 文件不存在，重置状态
-                logger.warning(f"[启动校验] 文件不存在，重置状态: {video.bvid}")
-                video.download_status = 'not_downloaded'
-                video.local_path = None
-                reset_count += 1
-        
-        # [性能优化] 每批次提交一次，避免长事务
-        db_session.commit()
-    
-    logger.info(f"[启动校验] 完成，修复了 {fixed_count} 个 local_path，重置了 {reset_count} 个无效状态")
+_diag("Importing .services ...")
+from .services import cleanup_service, download_service, clipboard_service
+_diag(".services imported")
 
-def async_verify_completed_downloads():
-    """在后台线程中执行文件校验，防止阻塞启动"""
-    from .services.clipboard_service import get_thread_safe_db_session
-    from .services.cleanup_service import DOWNLOAD_PATH
-    import time
-    time.sleep(2)  # 延迟 2 秒后开始校验，避免刚启动时抢占资源
-    with get_thread_safe_db_session() as db_session:
-        verify_completed_downloads(db_session, DOWNLOAD_PATH)
+_diag("Importing .migrate_db ...")
+from .migrate_db import run_migrations
+_diag(".migrate_db imported")
 
-def init_db_and_reset_tasks():
+# 确保数据目录存在
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(os.path.join(DATA_DIR, "covers"), exist_ok=True)
+os.makedirs(os.path.join(DATA_DIR, "stickers"), exist_ok=True)
+os.makedirs(os.path.join(DATA_DIR, "backgrounds"), exist_ok=True)
+os.makedirs(os.path.join(DATA_DIR, "particles"), exist_ok=True)
+os.makedirs(os.path.join(DATA_DIR, "fonts"), exist_ok=True)
+
+# 获取配置
+config = get_config()
+server_config = config.get_server_config()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 启动时执行
+    logger.info("正在初始化数据库...")
+    
+    # 1. 执行数据库迁移检查
     try:
-        migrate_db.run_migrations()
+        run_migrations()
     except Exception as e:
         logger.error(f"数据库迁移执行失败: {e}")
     models.Base.metadata.create_all(bind=db.engine)
     from .services.clipboard_service import get_thread_safe_db_session
+    
+    # 2. 启动时校验已下载文件的完整性
+    def verify_completed_downloads():
+        with get_thread_safe_db_session() as db_session:
+            # 使用分页查询避免一次性加载过多数据导致内存溢出
+            page_size = 100
+            offset = 0
+            fixed_count = 0
+            reset_count = 0
+            
+            # 获取总数用于日志
+            total_count = db_session.query(models.Video).filter(
+                models.Video.download_status == 'completed'
+            ).count()
+            
+            if total_count == 0:
+                logger.info("[启动校验] 无需校验的下载文件")
+                return
+                
+            logger.info(f"[启动校验] 开始校验 {total_count} 个已下载文件...")
+            
+            while True:
+                videos = db_session.query(models.Video).filter(
+                    models.Video.download_status == 'completed'
+                ).offset(offset).limit(page_size).all()
+                
+                if not videos:
+                    break
+                    
+                for video in videos:
+                    # 检查 local_path 是否存在
+                    if video.local_path and os.path.exists(video.local_path):
+                        continue
+                        
+                    # 如果 local_path 不存在，尝试在默认下载目录查找
+                    expected_path = os.path.join(cleanup_service.DOWNLOAD_PATH, f"{video.bvid}.mp4")
+                    if os.path.exists(expected_path):
+                        video.local_path = expected_path
+                        fixed_count += 1
+                    else:
+                        # 文件确实丢失，重置状态
+                        video.download_status = 'not_downloaded'
+                        video.local_path = None
+                        reset_count += 1
+                
+                # 每批次提交一次，避免长事务
+                db_session.commit()
+                offset += page_size
+                
+            logger.info(f"[启动校验] 完成，修复了 {fixed_count} 个 local_path，重置了 {reset_count} 个无效状态")
+
+    # 在后台线程执行校验，不阻塞启动
+    Thread(target=verify_completed_downloads, daemon=True, name="VerifyDownloadsThread").start()
+    
+    # 3. 重置未完成的下载任务状态
     with get_thread_safe_db_session() as db_session:
-        db_session.query(models.Video).filter(models.Video.download_status.in_(['pending', 'downloading'])).update({"download_status": "not_downloaded"}, synchronize_session=False)
+        db_session.query(models.Video).filter(
+            models.Video.download_status.in_(['pending', 'downloading'])
+        ).update({models.Video.download_status: 'not_downloaded'}, synchronize_session=False)
         db_session.commit()
         logger.info(">>> 已重置未完成的下载任务状态")
         logger.info(">>> 数据库初始化完成")
 
+    # 启动后台服务
+    logger.info("正在启动后台服务...")
+    
+    # 启动清理服务
+    cleanup_thread = Thread(target=cleanup_service.run_cleanup_scheduler, daemon=True, name="CleanupThread")
+    cleanup_thread.start()
+    
+    
+    # 启动剪贴板监听服务
+    from .dependencies import get_bili
+    clipboard_thread = Thread(target=clipboard_service.watch_clipboard, args=(get_bili(),), daemon=True, name="ClipboardThread")
+    clipboard_thread.start()
+    
+    logger.info(">>> 后台服务启动完成")
+    
+    yield
+    
+    # 关闭时执行
+    logger.info("正在关闭应用...")
+    logger.info(">>> 应用已关闭")
+
+app = FastAPI(title="BiliMusic API", lifespan=lifespan)
+
 # 配置 CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:12243",
-        "http://127.0.0.1:12243"
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 注册所有路由
-app.include_router(auth_router)
-app.include_router(bili_router)
-app.include_router(local_router)
-app.include_router(play_router)
-app.include_router(system_router)
-app.include_router(theme_router)
-app.include_router(download_router)
-app.include_router(stats_router)
+# 挂载静态文件目录
+app.mount("/local_covers", StaticFiles(directory=os.path.join(DATA_DIR, "covers")), name="local_covers")
+app.mount("/local_stickers", StaticFiles(directory=os.path.join(DATA_DIR, "stickers")), name="local_stickers")
+app.mount("/local_backgrounds", StaticFiles(directory=os.path.join(DATA_DIR, "backgrounds")), name="local_backgrounds")
+app.mount("/downloads", StaticFiles(directory=cleanup_service.DOWNLOAD_PATH), name="downloads")
 
-# --- 图像防盗链代理接口 ---
+# 注册路由
+app.include_router(auth.router)
+app.include_router(bili.router)
+app.include_router(local.router)
+app.include_router(play.router)
+app.include_router(system.router)
+app.include_router(theme.router)
+app.include_router(stats.router)
+app.include_router(download.router)
 
-from backend.services.cover_cache_service import get_cover_cache_service
+# 代理 B 站图片以解决防盗链问题
+from fastapi import Response
+import httpx
 
 @app.get("/api/proxy/image")
 async def proxy_image(url: str):
-    from urllib.parse import urlparse
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required")
     
-    parsed = urlparse(url)
-    allowed_hosts = ["i0.hdslb.com", "i1.hdslb.com", "i2.hdslb.com", "static.hdslb.com", "archive.biliimg.com"]
-    if parsed.netloc not in allowed_hosts or parsed.scheme not in ["http", "https"]:
-        raise HTTPException(status_code=403, detail="Invalid image source")
-
+    # 检查是否是本地图片
+    if url.startswith('/local_covers/'):
+        # 重定向到本地静态文件服务
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=url)
+        
+    # 使用封面缓存服务
+    from .services.cover_cache_service import get_cover_cache_service
     try:
         cover_service = get_cover_cache_service()
         image_data = await cover_service.get_cover(url)
-        
+
         if image_data is None:
             raise HTTPException(status_code=404, detail="Image not found")
-        
-        # 根据 URL 推断 Content-Type
+
+        # 确定 Content-Type
         content_type = "image/jpeg"
         if url.endswith(".png"):
             content_type = "image/png"
         elif url.endswith(".webp"):
             content_type = "image/webp"
-        
+        elif url.endswith(".gif"):
+            content_type = "image/gif"
+
         return Response(
             content=image_data,
             media_type=content_type,
-            headers={"Cache-Control": "public, max-age=31536000"}
+            headers={
+                "Cache-Control": "public, max-age=86400", # 浏览器缓存 1 天
+                "Access-Control-Allow-Origin": "*"
+            }
         )
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"Image proxy failed: {e}")
-        raise HTTPException(status_code=404, detail="Image not found")
-
-# 静态文件挂载
-from .core.paths import DATA_DIR
-app.mount("/local_stickers", StaticFiles(directory=os.path.join(DATA_DIR, "stickers")), name="local_stickers")
-
-BACKGROUNDS_DIR = os.path.join(DATA_DIR, "backgrounds")
-os.makedirs(BACKGROUNDS_DIR, exist_ok=True)
-app.mount("/local_backgrounds", StaticFiles(directory=BACKGROUNDS_DIR), name="local_backgrounds")
-
-COVERS_DIR = os.path.join(DATA_DIR, "covers")
-os.makedirs(COVERS_DIR, exist_ok=True)
-app.mount("/local_covers", StaticFiles(directory=COVERS_DIR), name="local_covers")
-
-class StaticFileCORSMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
-        if request.url.path.startswith("/downloads"):
-            response.headers["Access-Control-Allow-Origin"] = "*"
-            response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, OPTIONS"
-        return response
-
-app.add_middleware(StaticFileCORSMiddleware)
-app.mount("/downloads", StaticFiles(directory=cleanup_service.DOWNLOAD_PATH), name="downloads")
-
-# 挂载前端静态文件 (如果存在)
-from .core.paths import BASE_DIR
-from fastapi.responses import FileResponse
-
-frontend_dist = os.path.join(BASE_DIR, "frontend", "dist")
-if os.path.exists(frontend_dist):
-    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="frontend_assets")
-    
-    @app.get("/{catchall:path}")
-    async def serve_frontend(catchall: str):
-        if catchall.startswith("api/") or catchall.startswith("local_") or catchall.startswith("downloads/"):
-            raise HTTPException(status_code=404)
-        file_path = os.path.join(frontend_dist, catchall)
-        if os.path.isfile(file_path):
-            return FileResponse(file_path)
-        return FileResponse(os.path.join(frontend_dist, "index.html"))
-
-# 生命周期管理
-@app.on_event("startup")
-async def startup_event():
-    from .services.clipboard_service import watch_clipboard
-    # 同步执行数据库初始化，确保表创建完成
-    init_db_and_reset_tasks()
-    
-    # 启动后台异步文件校验任务，实现毫秒级启动
-    Thread(target=async_verify_completed_downloads, daemon=True).start()
-    
-    Thread(target=watch_clipboard, args=(bili,), daemon=True).start()
-    Thread(target=cleanup_service.run_cleanup_scheduler, daemon=True).start()
+        logger.error(f"代理图片失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -249,7 +262,9 @@ async def shutdown_event():
 # 日志中间件
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    logger.info(f"📡 [请求] {request.method} {request.url}")
+    # 忽略高频轮询请求的日志，并将普通请求降级为 DEBUG
+    if not request.url.path.endswith(('/system/events', '/download/status', '/system/clipboard/pending')):
+        logger.debug(f"📡 [请求] {request.method} {request.url}")
     try:
         response = await call_next(request)
         return response
@@ -257,3 +272,10 @@ async def log_requests(request: Request, call_next):
         logger.error(f"❌ [错误] {e}")
         raise e
 
+if __name__ == "__main__":
+    import uvicorn
+    port = server_config.get('port', 12180)
+    host = server_config.get('host', "127.0.0.1")
+    
+    logger.info(f"启动 BiliMusic 后端服务: http://{host}:{port}")
+    uvicorn.run(app, host=host, port=port)

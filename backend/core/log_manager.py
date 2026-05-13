@@ -7,23 +7,26 @@ class MemoryLogHandler(logging.Handler):
         super().__init__()
         self.capacity = capacity
         self.logs = deque(maxlen=capacity)
-        self.lock = threading.Lock()
 
     def emit(self, record):
         try:
             msg = self.format(record)
-            with self.lock:
-                self.logs.append({
-                    "time": record.created,
-                    "level": record.levelname,
-                    "message": msg
-                })
+            # logging.Handler.handle() 在调用 emit() 前已经获取了锁 (self.lock)
+            self.logs.append({
+                "time": record.created,
+                "level": record.levelname,
+                "message": msg
+            })
         except Exception:
             self.handleError(record)
 
     def get_logs(self):
-        with self.lock:
+        # 使用父类提供的 acquire() 和 release() 保证线程安全
+        self.acquire()
+        try:
             return list(self.logs)
+        finally:
+            self.release()
 
 memory_handler = MemoryLogHandler()
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - [%(name)s] %(message)s')

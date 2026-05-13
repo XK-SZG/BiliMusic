@@ -36,7 +36,7 @@ class Config:
         return {
             'server': {
                 'host': '127.0.0.1',
-                'port': 12280,
+                'port': 12180,
                 'debug': False
             },
             'storage': {

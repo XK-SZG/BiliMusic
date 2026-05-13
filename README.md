@@ -5,7 +5,7 @@
   <img src="frontend/public/icon.png" width="120" alt="BiliMusic Logo">
   <h1>BiliMusic</h1>
 
-![Version](https://img.shields.io/badge/version-1.0.18-blue)
+![Version](https://img.shields.io/badge/version-1.0.19-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![Vue](https://img.shields.io/badge/Vue-3.4-42b883)
@@ -172,7 +172,7 @@
    # 运行后端服务
    python run_backend.py
    ```
-   后端服务将在 `http://127.0.0.1:12243` 启动
+   后端服务将在 `http://127.0.0.1:12180` 启动
 
 3. **前端设置**
    ```bash
@@ -327,8 +327,8 @@ build.bat
 **Q: 安装时提示缺少依赖？**  
 A: 确保已安装 Python 3.8+ 和 Node.js 18+，并正确配置环境变量。
 
-**Q: 后端服务启动失败？**  
-A: 检查 12243 端口是否被占用，可以在 `config.yaml` 中修改端口。
+**Q: 后端服务启动失败？**
+A: 检查 12180 端口是否被占用，可以在 `config.yaml` 中修改端口。
 
 ### 使用问题
 

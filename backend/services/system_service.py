@@ -17,6 +17,19 @@ def execute_system_shutdown():
         if result.returncode != 0:
             raise Exception(f"关机指令执行失败: {result.stderr}")
 
+def execute_system_sleep():
+    """执行系统休眠指令"""
+    if platform.system() == "Windows":
+        os.system("rundll32.exe powrprof.dll,SetSuspendState 0,1,0")
+    elif platform.system() == "Darwin":
+        result = subprocess.run(["pmset", "sleepnow"], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise Exception(f"休眠指令执行失败: {result.stderr}")
+    else:
+        result = subprocess.run(["systemctl", "suspend"], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise Exception(f"休眠指令执行失败: {result.stderr}")
+
 def execute_factory_reset(db_session: Session, bili):
     """重置软件，清空所有数据但保留默认主题的静态资源"""
     keep_files = set()

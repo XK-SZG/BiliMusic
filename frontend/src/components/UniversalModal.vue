@@ -36,7 +36,7 @@ const editData = reactive({ title: '', owner: '', cover: null })
 watch(() => props.show, (isShowing) => {
   if (isShowing) {
     if (props.type === 'input') inputValue.value = props.initialValue || ''
-    if (props.type === 'score') scoreValue.value = Number(props.initialValue) || 5.0
+    if (props.type === 'score') scoreValue.value = Math.max(0.5, Number(props.initialValue) || 5.0)
     if (props.type === 'tags') {
       newTag.value = ''
     }
@@ -73,21 +73,17 @@ function handleCoverChange(e) {
 }
 
 function handleCancel() {
-  console.log('[UniversalModal] handleCancel 被调用, type:', props.type, 'requireConfirm:', props.extraData?.requireConfirm)
   if (props.type === 'confirm') {
     // 如果设置了 requireConfirm，点击取消或遮罩层应该传递 null 表示取消操作
     if (props.extraData?.requireConfirm) {
-      console.log('[UniversalModal] emit confirm(null) - 取消操作')
       emit('confirm', null)
       // 延迟emit close，确保confirm事件先被处理
       setTimeout(() => {
-        console.log('[UniversalModal] emit close() (延迟)')
         emit('close')
       }, 0)
       return
     }
   }
-  console.log('[UniversalModal] emit close()')
   emit('close')
 }
 
@@ -173,7 +169,7 @@ async function handleCreateCollection() {
         <!-- 2. 评分模式 -->
         <div v-if="type === 'score'" class="space-y-6">
           <div class="text-center text-5xl font-black text-pink-500 tabular-nums">{{ scoreValue.toFixed(1) }}</div>
-          <input type="range" min="0" max="10" step="0.5" v-model.number="scoreValue"
+          <input type="range" min="0.5" max="10" step="0.5" v-model.number="scoreValue"
                  class="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-lg appearance-none cursor-pointer accent-pink-500" />
         </div>
 

@@ -98,7 +98,7 @@ class BiliManager:
                     # 显式设置到 .bilibili.com 域名下，确保全站通用
                     self.session.cookies.set(k, v, domain=".bilibili.com", path="/")
                 
-                logging.info(f"已从文件加载 {len(cookies)} 个 Cookie")
+                logging.debug(f"已从文件加载 {len(cookies)} 个 Cookie")
                 return True
             except Exception as e:
                 logging.error(f"加载 Cookie 文件失败: {e}")
@@ -112,7 +112,7 @@ class BiliManager:
             if not self.session.cookies.get('buvid3'):
                 self.session.cookies.set('buvid3', str(uuid.uuid4()).upper() + "infoc", domain=".bilibili.com")
 
-            logging.info("正在快速验证登录状态...")
+            logging.debug("正在快速验证登录状态...")
             
             # 增加 Header 模拟浏览器
             headers = {
@@ -146,7 +146,7 @@ class BiliManager:
                     # 提取 CSRF
                     self.csrf = self.session.cookies.get('bili_jct', domain=".bilibili.com") or self.session.cookies.get('bili_jct')
                     
-                    logging.info(f"登录验证成功: {self.uname} (UID: {self.mid})")
+                    logging.debug(f"登录验证成功: {self.uname} (UID: {self.mid})")
                     self.save_user_info_cache()
                     return True
                 else:
@@ -166,7 +166,7 @@ class BiliManager:
             if not self.session.cookies.get('buvid3'):
                 self.session.cookies.set('buvid3', str(uuid.uuid4()).upper() + "infoc", domain=".bilibili.com")
 
-            logging.info("正在请求 B 站导航接口验证登录状态...")
+            logging.debug("正在请求 B 站导航接口验证登录状态...")
             
             # 增加 Header 模拟浏览器
             headers = {
@@ -205,7 +205,7 @@ class BiliManager:
                     # 提取 CSRF (bili_jct)
                     self.csrf = self.session.cookies.get('bili_jct', domain=".bilibili.com") or self.session.cookies.get('bili_jct')
                     
-                    logging.info(f"B 站登录验证成功: {self.uname} (UID: {self.mid})")
+                    logging.debug(f"B 站登录验证成功: {self.uname} (UID: {self.mid})")
                     self.save_user_info_cache() # 保存缓存
                     return True
                 else:

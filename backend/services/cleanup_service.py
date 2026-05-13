@@ -66,8 +66,12 @@ def _enforce_cache_limit():
     
     with get_thread_safe_db_session() as db:
         # 获取所有已下载的视频，按添加时间升序（最旧的在前）
-        videos_to_prune = db.query(Video).filter(Video.download_status == 'completed').order_by(
-            Video.added_at.asc()).all()
+        # 排除本地导入的视频 (is_local == 1) 和已加入任何媒体库的视频 (~Video.collections.any())
+        videos_to_prune = db.query(Video).filter(
+            Video.download_status == 'completed',
+            Video.is_local == 0,
+            ~Video.collections.any()
+        ).order_by(Video.added_at.asc()).all()
 
         total_size = 0
         valid_videos = []

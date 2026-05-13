@@ -167,7 +167,7 @@ function handleClose() {
             <div v-if="isHovering && displayVideoInfo.bvid" class="absolute inset-0 z-10 bg-black overflow-hidden">
               <video ref="videoRef"
                      :key="displayVideoInfo.bvid"
-                     :src="`http://127.0.0.1:12243/api/play/stream/${displayVideoInfo.bvid}?quality=16`"
+                     :src="`http://127.0.0.1:12180/api/play/stream/${displayVideoInfo.bvid}?quality=16`"
                      class="w-full h-full object-cover pointer-events-none select-none"
                      autoplay muted loop playsinline crossorigin="anonymous"></video>
               <div class="absolute inset-0 z-20 pointer-events-auto cursor-default bg-black/10"></div>
@@ -274,7 +274,7 @@ function handleClose() {
             <div v-if="isHovering && displayVideoInfo.bvid" class="absolute inset-0 z-10 bg-black overflow-hidden">
               <video ref="videoRef"
                      :key="displayVideoInfo.bvid"
-                     :src="`http://127.0.0.1:12243/api/play/stream/${displayVideoInfo.bvid}?quality=16`"
+                     :src="`http://127.0.0.1:12180/api/play/stream/${displayVideoInfo.bvid}?quality=16`"
                      class="w-full h-full object-cover pointer-events-none select-none"
                      autoplay muted loop playsinline crossorigin="anonymous"></video>
               <div class="absolute inset-0 z-20 pointer-events-auto cursor-default bg-black/10"></div>

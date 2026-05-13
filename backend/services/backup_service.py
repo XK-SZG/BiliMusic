@@ -30,7 +30,8 @@ def export_library_to_zip(
     collection_ids: List[str],
     export_type: str,
     export_queue: bool,
-    queue_data: list
+    queue_data: list,
+    save_path: str = None
 ):
     col_data = []
     video_data = []
@@ -90,42 +91,101 @@ def export_library_to_zip(
         "queue": queue_data if export_queue else []
     }
 
-    temp_fd, temp_path = tempfile.mkstemp(suffix=".zip")
-    os.close(temp_fd)
+    import time
+    import traceback
+    import tracemalloc
     
-    with zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("metadata.json", json.dumps(metadata, ensure_ascii=False, indent=2))
-        
-        from ..core.paths import DATA_DIR
-        covers_dir = os.path.join(DATA_DIR, "covers")
-        media_dir = cleanup_service.DOWNLOAD_PATH
-        target_bvids = export_bvids.union(local_bvids)
-        
-        if target_bvids:
-            db_videos = db_session.query(models.Video).filter(models.Video.bvid.in_(target_bvids)).all()
-            written_files = set()
-            for v in db_videos:
-                if v.pic and not v.pic.startswith("http"):
-                    cover_path = os.path.join(covers_dir, v.pic)
-                    zip_cover_path = f"covers/{v.pic}"
-                    if os.path.exists(cover_path) and zip_cover_path not in written_files:
-                        zf.write(cover_path, zip_cover_path)
-                        written_files.add(zip_cover_path)
-                
-                local_path = v.local_path
-                if getattr(v, 'is_local', 0) == 0 and not local_path:
-                    default_path = os.path.join(media_dir, f"{v.bvid}.mp4")
-                    if os.path.exists(default_path):
-                        local_path = default_path
-                        
-                if local_path and os.path.exists(local_path):
-                    filename = os.path.basename(local_path)
-                    zip_media_path = f"media/{v.bvid}_{filename}"
-                    if zip_media_path not in written_files:
-                        zf.write(local_path, zip_media_path)
-                        written_files.add(zip_media_path)
+    tracemalloc.start()
+    logger.info(f"开始执行全量打包任务, export_library={export_library}, export_type={export_type}, 目标集合数: {len(collection_ids)}")
+    start_time = time.time()
 
-    return temp_path
+    if save_path:
+        temp_path = save_path
+        logger.info(f"使用用户指定的保存路径: {temp_path}")
+    else:
+        temp_fd, temp_path = tempfile.mkstemp(prefix="BiliMusic_Backup_", suffix=".zip")
+        os.close(temp_fd)
+        logger.info(f"已分配临时文件路径: {temp_path}")
+    
+    try:
+        # 优化点 1：压缩策略优化
+        # 针对高熵视频文件强制切换至 ZIP_STORED（仅打包不压缩）
+        # 避免无意义的二次压缩，将 CPU 消耗降至最低，彻底解决长时阻塞问题
+        with zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_STORED) as zf:
+            zf.writestr("metadata.json", json.dumps(metadata, ensure_ascii=False, indent=2))
+            logger.debug("成功写入 metadata.json")
+            
+            from ..core.paths import DATA_DIR
+            covers_dir = os.path.join(DATA_DIR, "covers")
+            media_dir = cleanup_service.DOWNLOAD_PATH
+            target_bvids = export_bvids.union(local_bvids)
+            
+            if target_bvids:
+                db_videos = db_session.query(models.Video).filter(models.Video.bvid.in_(target_bvids)).all()
+                written_files = set()
+                total_videos = len(db_videos)
+                logger.info(f"共需处理 {total_videos} 个视频文件")
+                
+                for idx, v in enumerate(db_videos, 1):
+                    video_start_time = time.time()
+                    logger.debug(f"[{idx}/{total_videos}] 开始处理视频: {v.bvid} ({v.title})")
+                    
+                    if v.pic and not v.pic.startswith("http"):
+                        cover_path = os.path.join(covers_dir, v.pic)
+                        zip_cover_path = f"covers/{v.pic}"
+                        if os.path.exists(cover_path) and zip_cover_path not in written_files:
+                            zf.write(cover_path, zip_cover_path)
+                            written_files.add(zip_cover_path)
+                    
+                    local_path = v.local_path
+                    if getattr(v, 'is_local', 0) == 0 and not local_path:
+                        default_path = os.path.join(media_dir, f"{v.bvid}.mp4")
+                        if os.path.exists(default_path):
+                            local_path = default_path
+                            
+                    if local_path and os.path.exists(local_path):
+                        filename = os.path.basename(local_path)
+                        zip_media_path = f"media/{v.bvid}_{filename}"
+                        if zip_media_path not in written_files:
+                            file_size = os.path.getsize(local_path)
+                            current_mem, peak_mem = tracemalloc.get_traced_memory()
+                            logger.debug(f"[{idx}/{total_videos}] 准备写入文件: {local_path}, 大小: {file_size / (1024*1024):.2f} MB, 当前内存: {current_mem / (1024*1024):.2f} MB, 峰值内存: {peak_mem / (1024*1024):.2f} MB")
+                            
+                            # 优化点 2：核心流处理
+                            # zipfile.write 内部采用分块读取写入，实现 O(1) 内存复杂度
+                            try:
+                                zf.write(local_path, zip_media_path)
+                                written_files.add(zip_media_path)
+                            except BaseException as write_e:
+                                logger.error(f"[{idx}/{total_videos}] 写入文件 {local_path} 时发生异常: {type(write_e).__name__} - {write_e}")
+                                logger.error(traceback.format_exc())
+                                raise write_e
+                            
+                            video_cost = time.time() - video_start_time
+                            logger.info(f"[{idx}/{total_videos}] 成功写入视频: {v.bvid}, 耗时: {video_cost:.2f}s")
+                    else:
+                        logger.warning(f"[{idx}/{total_videos}] 视频文件不存在: {local_path}")
+
+        total_cost = time.time() - start_time
+        final_mem, final_peak = tracemalloc.get_traced_memory()
+        logger.info(f"全量打包任务执行完毕, 总耗时: {total_cost:.2f}s, 最终内存: {final_mem / (1024*1024):.2f} MB, 峰值内存: {final_peak / (1024*1024):.2f} MB, 临时文件路径: {temp_path}")
+        tracemalloc.stop()
+        return temp_path
+    except BaseException as e:
+        # 优化点 3：防泄漏生命周期管理 (第一级防御)
+        # 基于 try-except 结构的强制兜底清理策略，确保在任务异常中断时 Temp 目录被绝对抹除
+        # 捕获 BaseException 以拦截 asyncio.CancelledError 等底层异常
+        logger.error(f"打包过程发生严重异常: {type(e).__name__} - {e}")
+        logger.error(f"异常堆栈: {traceback.format_exc()}")
+        if not save_path:
+            remove_temp_file(temp_path)
+        else:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass
+        raise e
 
 def analyze_import_zip(file_content: bytes, db_session: Session):
     session_id = uuid.uuid4().hex

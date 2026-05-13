@@ -20,7 +20,6 @@ watch(() => props.show, async (newVal) => {
     // 弹窗打开时暂停剪贴板监听
     try {
       await systemApi.pauseClipboard()
-      console.log('剪贴板监听已暂停')
     } catch (e) {
       console.error('暂停剪贴板监听失败:', e)
     }
@@ -28,7 +27,6 @@ watch(() => props.show, async (newVal) => {
     // 弹窗关闭时恢复剪贴板监听
     try {
       await systemApi.resumeClipboard()
-      console.log('剪贴板监听已恢复')
     } catch (e) {
       console.error('恢复剪贴板监听失败:', e)
     }
