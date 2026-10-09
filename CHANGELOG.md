@@ -149,6 +149,26 @@
   前者现在会通过 SSE 发出明确的 error 帧而不是静默同步出空结果。
   涉及 [`backend/services/sync_service.py`](backend/services/sync_service.py)。
 
+#### 打包版登录态不落盘，每次启动都要重新扫码登录
+
+- **问题描述**：**打包版实测发现**（本次发布前对 `backend.exe` 做了真实启动冒烟测试）：
+  启动后数据目录里既没有 `bili_cookies.json` 也没有 `bili_user_info.json`，
+  表现为**每次打开软件都要重新扫码登录**。开发环境完全正常，因此长期未被发现。
+- **根本原因**：凭据与缓存文件用的是两种都不可靠的相对写法：
+  - `BiliManager(cookie_file="backend/data/bili_cookies.json")` —— 相对**进程工作目录**，
+    打包后工作目录是 `resources/backend`，于是 Cookie 被写到
+    `<安装目录>/resources/backend/backend/data/`（不是数据目录）；
+  - `os.path.join(os.path.dirname(__file__), "..", "data", "bili_user_info.json")` ——
+    相对**模块位置**；PyInstaller `--onefile` 下模块位于临时解包目录 `sys._MEIPASS`，
+    于是用户信息被写到 `<MEIPASS>/backend/data/`，**进程退出即被删除**。
+  实测在冒烟沙盒里确实观察到残留的 `<解包目录>/backend/data/` 目录，
+  而真正的 `data/` 下两个文件都不存在 —— 与该分析完全吻合。
+- **修复方式**：新增 `BiliManager._data_path()`，与 `core/paths.DATA_DIR` 统一，
+  构造函数默认值改为 `None` + 解析，三处 `bili_user_info.json` 写法一并收口；
+  `download_path` 默认值同样改为 `DATA_DIR/downloads`
+  （此前它会在错误位置创建一个空的 `downloads` 目录）。
+  涉及 [`backend/core/bili_manager.py`](backend/core/bili_manager.py)。
+
 #### 数据库迁移失败被静默吞掉，错误系统收不到上报
 
 - **问题描述**：`run_migrations()` 捕获异常后只记录日志就返回，

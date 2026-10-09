@@ -9,9 +9,28 @@ import logging
 from io import BytesIO
 import base64
 from cachetools import TTLCache, cached
+from .paths import DATA_DIR
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+def _data_path(filename: str) -> str:
+    """把数据文件名解析为**数据目录**下的绝对路径。
+
+    [修复] 原先凭据与缓存文件用的是两种都不可靠的相对写法，在打包版里全部落空：
+      - `cookie_file="backend/data/bili_cookies.json"` —— 相对**进程工作目录**；
+      - `os.path.join(os.path.dirname(__file__), "..", "data", ...)` —— 相对**模块位置**。
+
+    PyInstaller `--onefile` 下模块位于临时解包目录 `sys._MEIPASS`，且工作目录是
+    `resources/backend`，于是：
+      - 前者把 Cookie 写到 `<exe目录>/backend/data/`（不是数据目录）；
+      - 后者把用户信息写到 `<MEIPASS>/backend/data/`，**进程退出即被删除**。
+    实测打包版启动后 `data/` 下既没有 `bili_cookies.json` 也没有 `bili_user_info.json` ——
+    表现为「每次启动都要重新扫码登录」。统一改为走 `paths.DATA_DIR`。
+    """
+    return os.path.join(DATA_DIR, filename)
+
 
 # 全局缓存实例，配置 5 分钟 (300 秒) 的过期时间，最多 1000 个条目
 bili_api_cache = TTLCache(maxsize=1000, ttl=300)
@@ -21,9 +40,11 @@ class BiliManager:
     # 年度大会员小图标 (Base64 备用)
     ICON_ANNUAL_VIP = "data:image/png;base64,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"
 
-    def __init__(self, cookie_file="backend/data/bili_cookies.json", download_path="backend/data/downloads"):
-        self.cookie_file = cookie_file
-        self.download_path = download_path
+    def __init__(self, cookie_file=None, download_path=None):
+        # [修复] 默认值原先是指向数据目录的「相对路径」，打包版会落到错误位置
+        # （详见 _data_path 的说明）。改为 None + 解析，避免在打包版里错位。
+        self.cookie_file = cookie_file or _data_path("bili_cookies.json")
+        self.download_path = download_path or os.path.join(DATA_DIR, "downloads")
         os.makedirs(os.path.dirname(self.cookie_file), exist_ok=True)
         os.makedirs(self.download_path, exist_ok=True)
 
@@ -49,7 +70,7 @@ class BiliManager:
 
     def load_user_info_cache(self):
         """加载离线缓存的用户信息"""
-        cache_file = os.path.join(os.path.dirname(__file__), "..", "data", "bili_user_info.json")
+        cache_file = _data_path("bili_user_info.json")
         if os.path.exists(cache_file):
             try:
                 with open(cache_file, "r", encoding="utf-8") as f:
@@ -71,7 +92,7 @@ class BiliManager:
 
     def save_user_info_cache(self):
         """保存离线缓存的用户信息"""
-        cache_file = os.path.join(os.path.dirname(__file__), "..", "data", "bili_user_info.json")
+        cache_file = _data_path("bili_user_info.json")
         try:
             os.makedirs(os.path.dirname(cache_file), exist_ok=True)
             data = {
@@ -258,7 +279,7 @@ class BiliManager:
                 logging.error(f"删除 Cookie 文件失败: {e}")
         
         # 删除用户信息缓存
-        cache_file = os.path.join(os.path.dirname(__file__), "..", "data", "bili_user_info.json")
+        cache_file = _data_path("bili_user_info.json")
         if os.path.exists(cache_file):
             try:
                 os.remove(cache_file)

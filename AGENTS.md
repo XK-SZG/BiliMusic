@@ -278,6 +278,14 @@ node tests\verify_update_overwrite.cjs
   - 后台线程使用 `get_thread_safe_db_session()` 获取会话（`backend/services/clipboard_service.py`）。
 - **配置读取**：统一通过 `backend/core/config.py` 的 `get_config()` 与该类的 `get_*_config()` / 点号键 `config.get('download.max_workers', 3)`，不要新增硬编码常量。
 - **路径**：统一使用 `backend/core/paths.py` 的 `DATA_DIR` / `BASE_DIR`，不要在业务代码里拼接相对路径（`paths.py` 同时兼容开发目录与 PyInstaller 冻结环境）。
+- **打包后必须验证路径（v1.0.24 血泪教训）**：`--onefile` 下模块位于临时解包目录 `sys._MEIPASS`（**进程退出即删除**），
+  而进程工作目录是 `resources/backend`。因此下面两种写法在开发环境**都正常**、在打包版**都错位**：
+  1. 相对工作目录的裸路径（如 `"backend/data/bili_cookies.json"`）→ 写到 `<exe目录>/backend/data/`；
+  2. 相对模块位置的路径（如 `os.path.join(os.path.dirname(__file__), "..", "data")`）→ 写到 `<MEIPASS>/backend/data/`，**重启即丢**。
+  这正是「打包版每次启动都要重新扫码登录」的成因（Cookie 与用户信息缓存都落到了错误位置）。
+  **规则**：一切需要跨进程存活的数据（凭据、缓存、数据库、下载、日志）都必须经 `DATA_DIR` 解析；
+  相对路径只允许用于「随包发布的只读资源」。
+  **验证方式**：改完路径相关代码后，务必用打包产物做一次冒烟（见 5.8），不要把「开发环境能跑」当成结论。
 - **路径拼接安全（v1.0.24 补，务必遵守）**：**任何来自请求体 / 上传文件名 / 压缩包成员名 / 数据库里历史脏数据的字符串，都不得直接作为路径分量使用**。
   项目里已修过三类真实缺陷，都是同一个根因：
   1. `os.path.join(base, user_value)` —— 当 `user_value` 是绝对路径时会**丢弃 `base`**，是 `..\..\` 之外的第二种逃逸方式（`/api/system/fonts/upload`、主题包导入、备份恢复三处均中过招）；
@@ -556,11 +564,12 @@ node tests\verify_update_overwrite.cjs
 | 本地分支 | **仅 `main` 一个** | `.git/refs/heads/` 下只有 `main`；不存在 `master`、`develop`、`feature/*` 等分支 |
 | 远程 | `origin` = `https://github.com/XK-SZG/BiliMusic.git` | `.git/config` 第 7-9 行 |
 | 上游跟踪 | `main` 跟踪 `origin/main` | `.git/config` 第 10-12 行 |
-| 当前 HEAD | `92780a83`（与 `origin/main` 一致，无未推送提交） | `.git/refs/heads/main` 与 `.git/refs/remotes/origin/main` 值相同 |
-| 标签 | **无任何 tag** | `.git/logs/HEAD` 的 24 条记录中，操作类型只有 `commit`、`Branch`、`reset`，**无任何 `tag:` 记录**（Git 会在创建 tag 时写入 reflog，故可据此判定）。`.git/refs/tags/` 目录本身存在但为空 |
+| 当前 HEAD | 会随发版变化，**以 `git log --oneline -1` 为准**（v1.0.24 时为 `a90a03a`） | `git log` / `git status -sb`。不要照抄文档里的哈希 |
+| 标签 | **远端存在 3 个 tag**：`v1.0.0`、`v1.0.17`、`v1.0.20`（本地无 tag，需 `git fetch` 后才可见） | `git ls-remote --tags origin` 实测输出。**注意**：此前本文档据 `.git/logs/HEAD` 推断「无任何 tag」，该结论**是错的**——reflog 只记录本机操作，而这三个 tag 是推送时由远端创建的，本地 reflog 里没有 `tag:` 记录。判断 tag 必须用 `git ls-remote --tags origin`，不要用 reflog 推断 |
 | Git hooks | **无启用的 hook**（仅 `.sample` 模板） | `.git/hooks/pre-commit.sample` 等均为样例文件，无同名可执行 hook |
 | 提交作者 | `XK <kangxu346@gmail.com>` | `.git/logs/HEAD` 全部条目 |
 | 提交时区 | `+0800` | `.git/logs/HEAD` |
+| 推送凭据 | Windows 凭据管理器（`credential.helper=manager`），实测 `git push` 无需交互即可成功 | `git config --get credential.helper` |
 
 ### 4.2 提交信息格式（依据真实提交历史）
 
@@ -616,7 +625,11 @@ node tests\verify_update_overwrite.cjs
 - 「(待补充：是否要求 rebase / squash 合并、`main` 是否受保护)」——仅从本地元数据无法判断远程仓库的分支保护与合并策略。
 - 「(待补充：CI 校验规则)」——不存在任何 CI 配置（无 `.github/` 目录），因此**没有**自动化门禁（无 lint、无测试、无构建校验）。
 - 「(待补充：代码所有者与 review 要求)」——无 `CODEOWNERS` 文件。
-- 「(待补充：发布流程)」——无任何 tag，`generate_checksums.bat` 会为 `frontend/release/*.exe` 生成 `sha256.txt`，但打 tag 与上传 GitHub Release 的流程无明文记载。
+- 「(待补充：发布流程)」——**已部分查明**：远端有 `v1.0.0` / `v1.0.17` / `v1.0.20` 三个 tag，
+  但**没有**任何 GitHub Release 的官方步骤记载；`generate_checksums.bat` 会为 `frontend/release/*.exe` 生成 `sha256.txt`。
+  v1.0.24 发布时**按维护者要求只做了提交 + 推送，未打 tag、未创建 Release**。
+  「(待补充：是否应为每个版本打 tag 并上传安装包)」——需维护者明确。
+- 「(待补充：本机未安装 `gh` CLI)」——如需脚本化创建 GitHub Release，需先安装 `gh` 或提供 token；否则只能在网页端手工上传安装包。
 - 「(待补充：被 `reset` 放弃的提交是否还应保留其内容)」——`.git/logs/HEAD` 显示 `629b9d72`、`e2d75bec`、`6210a067` 等提交已被放弃，其内容是否需要恢复请先询问维护者。
 
 ---
@@ -630,3 +643,20 @@ node tests\verify_update_overwrite.cjs
 5. **性能敏感路径**：播放队列持久化、SQLite 并发、封面缓存、流媒体代理在 `CHANGELOG.md` 1.0.16 中做过专门优化，改动前先读该条目，避免回退既有优化（如已废弃的 `with_for_update()` 悲观锁、`JSON.parse(JSON.stringify())` 深拷贝）。
 6. **无法验证时**：标注「(待补充：…)」并向维护者确认，不要臆造命令、路径或规范。
 7. **不要扩大改动范围**：除被明确要求的文件外，不要顺手重构、格式化或「清理」无关代码；本项目没有自动格式化门禁，大范围重排会造成无法审阅的 diff。
+8. **发布前必须做打包冒烟（v1.0.24 起强制）**：开发环境**测不出**打包版的两类问题——
+   路径错位（见 2.2）与安装器行为。发布前至少完成：
+   1. `build.bat`（或分别执行 PyInstaller + `npm run electron:build`）产出
+      `dist/backend/backend.exe` 与 `frontend/release/BiliMusic Setup <版本>.exe`；
+   2. **把 `backend.exe` 复制到临时目录**运行（不要直接跑已安装版本）：
+      ```powershell
+      $sandbox = Join-Path $env:TEMP 'bilimusic-smoke'
+      New-Item -ItemType Directory -Path $sandbox -Force | Out-Null
+      Copy-Item dist\backend\backend.exe $sandbox
+      Start-Process "$sandbox\backend.exe" -ArgumentList '12181' -WorkingDirectory $sandbox
+      # 就绪后探测：Invoke-WebRequest http://127.0.0.1:12181/api/logs/stats
+      ```
+      断言：`<沙盒>/data/` 下出现 `bili_player.db`、`logs/`、`covers/` 等；
+      **不得**出现 `<沙盒>/backend/data/` 之类的错位目录（那说明又踩了 2.2 的坑）；
+   3. 跑一遍 `node tests/verify_update_overwrite.cjs` 确认升级仍不丢数据；
+   4. 复核安装包版本号：`(Get-Item 'frontend\release\BiliMusic Setup *.exe').VersionInfo`。
+   可用 `generate_checksums.bat` 生成 `sha256.txt` 随包发布。
