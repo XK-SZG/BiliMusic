@@ -178,13 +178,23 @@ generate_checksums.bat  :: 为 frontend/release/*.exe 生成 SHA256 到 frontend
 **项目自检脚本**（无需测试框架，见 2.5）：
 
 ```powershell
-# 后端自检（进程内 TestClient + 临时 uvicorn 验证 SSE），134 项断言
+# 后端自检（进程内 TestClient + 临时 uvicorn 验证 SSE），148 项断言
 .venv\Scripts\python.exe tests\verify_backend_v1021.py
 
 # 前端 ↔ 后端接线静态校验（API 方法是否存在、令牌是否携带）
 node tests\check_api_wiring.cjs
 node tests\check_api_wiring_selftest.cjs   # 校验脚本自身的负向自检
+
+# 封面地址相关（v1.0.23 新增）
+.venv\Scripts\python.exe tests\verify_cover_url.py
+.venv\Scripts\python.exe tests\verify_proxy_image.py
+node tests\verify_cover_format.cjs
+
+# 发行包「覆盖更新」数据安全沙盒验证（v1.0.24 新增）
+node tests\verify_update_overwrite.cjs
 ```
+
+**改动前后都应跑一遍**：本项目没有 CI，上述脚本是**唯一**的自动化门禁。
 
 > 端口说明：后端默认端口为 `12180`（`config.yaml`、`backend/core/config.py` 第 39 行、`frontend/main.cjs` 第 31 行一致）；`frontend/vite.config.js` 第 21 行将开发服务器端口固定为 `3000` 且 `strictPort: true`。`run_frontend.bat` 的提示文案已与 `vite.config.js` 对齐（历史版本误写为 `5173`）。
 
@@ -268,6 +278,14 @@ node tests\check_api_wiring_selftest.cjs   # 校验脚本自身的负向自检
   - 后台线程使用 `get_thread_safe_db_session()` 获取会话（`backend/services/clipboard_service.py`）。
 - **配置读取**：统一通过 `backend/core/config.py` 的 `get_config()` 与该类的 `get_*_config()` / 点号键 `config.get('download.max_workers', 3)`，不要新增硬编码常量。
 - **路径**：统一使用 `backend/core/paths.py` 的 `DATA_DIR` / `BASE_DIR`，不要在业务代码里拼接相对路径（`paths.py` 同时兼容开发目录与 PyInstaller 冻结环境）。
+- **路径拼接安全（v1.0.24 补，务必遵守）**：**任何来自请求体 / 上传文件名 / 压缩包成员名 / 数据库里历史脏数据的字符串，都不得直接作为路径分量使用**。
+  项目里已修过三类真实缺陷，都是同一个根因：
+  1. `os.path.join(base, user_value)` —— 当 `user_value` 是绝对路径时会**丢弃 `base`**，是 `..\..\` 之外的第二种逃逸方式（`/api/system/fonts/upload`、主题包导入、备份恢复三处均中过招）；
+  2. 只按 `/` 拆分压缩包成员名 —— Windows 上 `..\..\x` 仍能逃逸，必须 `os.path.basename(name.replace("\\", "/"))`；
+  3. 用 `abspath(...).startswith(dir)` 做归属校验 —— 前缀匹配会被兄弟目录（如 `backgrounds_backup`）绕过，应改为比较 `os.path.dirname(target) == os.path.abspath(dir)` 或用 `os.path.commonpath`。
+  另外两条配套要求：
+  - **删除操作必须收口**：`shutil.rmtree` / `RMDir /r` 之类只能作用于「自己刚刚创建、且名字可预期」的临时目录；`backup_service.remove_temp_file()` 会校验目标必须位于系统临时目录且带导入前缀，是这个模式的参考实现；
+  - **上传前先建目录、写完再校验体积**：不要对未做上限的 `zf.read(member)` 直接落盘（zip 炸弹）。
 - **长任务**：耗时/周期性任务放入后台守护线程，并在 `backend/main.py` 的 `lifespan` 中启动（现有：`VerifyDownloadsThread`、`CleanupThread`、`ClipboardThread`），线程需带 `name=` 且 `daemon=True`。
 
 ### 2.3 前端（JavaScript / Vue）
@@ -294,24 +312,25 @@ node tests\check_api_wiring_selftest.cjs   # 校验脚本自身的负向自检
 
 ### 2.5 测试与自检（重要，勿臆造）
 
-- **仓库没有测试框架配置**：不存在 `pytest.ini`、`pyproject.toml`、`setup.cfg`、`tox.ini`、`jest.config.*`，也没有 `test_*.py` / `*.test.js`。**没有 CI**（无 `.github/` 目录），因此**没有自动化门禁**。
-- 但 `tests/` 下有**三份可运行的自检／校验脚本**（v1.0.21 起新增，`tests/README.md` 已同步重写）：
+- **仓库没有测试框架配置**：不存在 `pytest.ini`、`pyproject.toml`、`setup.cfg`、`tox.ini`、`jest.config.*`，也没有 `test_*.py` / `*.test.js`。**没有 CI**（无 `.github/` 目录），因此**没有自动化门禁**——`tests/` 下的脚本是本项目**唯一**的自动化防线，改动后必须手工跑。
+- `tests/` 下现有 **7 份可运行的自检／校验脚本**（`tests/README.md` 与之同步）：
 
   | 脚本 | 作用 | 通过标准 |
   |---|---|---|
-  | `tests/verify_backend_v1021.py` | 后端自检：进程内 `TestClient` 启动应用 + 临时 `uvicorn`（端口 12199）验证 SSE；覆盖日志/错误/调试/下载修复/脱敏/轮转共 **134 项断言** | 输出「通过 134 项，失败 0 项」，退出码 `0` |
+  | `tests/verify_backend_v1021.py` | 后端自检：进程内 `TestClient` 启动应用 + 临时 `uvicorn`（端口 12199）验证 SSE；覆盖日志/错误/调试/下载修复/脱敏/路径穿越防护/轮转共 **148 项断言** | 输出「通过 148 项，失败 0 项」，退出码 `0` |
+  | `tests/verify_update_overwrite.cjs` | **发行包覆盖更新数据安全沙盒验证**：解析真实参与编译的 `frontend/build/uninstall_list.nsh`，按 NSIS 语义在系统临时目录重演一次升级，断言用户数据完好、程序文件被替换；内置负向自检 | 输出「通过 19 项，失败 0 项」，退出码 `0` |
   | `tests/check_api_wiring.cjs` | 前端↔后端接线静态校验：①组件调用的 `xxxApi.method()` 是否真的导出；②受 `require_debug_token` 保护的路由，前端是否携带 `X-Debug-Token` | 输出「检查通过」，退出码 `0` |
   | `tests/check_api_wiring_selftest.cjs` | 上述校验脚本的**负向自检**：临时把 `getDebugAudit` 改回漏传令牌，确认能被检出，然后自动恢复 | 输出「负向测试通过」+「恢复后检查通过」 |
-
-  ```powershell
-  .venv\Scripts\python.exe tests\verify_backend_v1021.py
-  node tests\check_api_wiring.cjs
-  node tests\check_api_wiring_selftest.cjs
-  ```
+  | `tests/verify_cover_url.py` | 后端封面地址净化逻辑（24 项） | 「通过 24 项，失败 0 项」 |
+  | `tests/verify_cover_format.cjs` | 前端 `formatImg` / `normalizePic`（18 项） | 「通过 18 项，失败 0 项」 |
+  | `tests/verify_proxy_image.py` | `/api/proxy/image` 健壮性（10 项） | 「通过 10 项，失败 0 项」 |
 
   改前端 `api/*.js` 后**务必**跑一遍 `check_api_wiring.cjs`——历史上两次真实缺陷
   （`systemApi.getStats is not a function`、审计日志 403 令牌校验失败）都是
   「构建通过、运行期才炸」，正是该脚本要拦的类型。
+  改**安装器 / 打包配置**（`frontend/installer.nsh`、`frontend/build/afterPack.cjs`、
+  `frontend/package.json` 的 `build` 段）后**务必**跑 `verify_update_overwrite.cjs`，
+  它是「升级不丢用户数据」这条红线的唯一自动化守卫。
 
 - 手工验证手段：启动后端调接口（`python run_backend.py`，`http://127.0.0.1:12180/docs` 有自动生成的接口文档）；前端 `npm run dev` 观察界面；`cd frontend && npm run build` 验证所有 SFC 可编译。
 - 自检脚本的**安全约定**（新增脚本时必须遵守）：
@@ -319,7 +338,9 @@ node tests\check_api_wiring_selftest.cjs   # 校验脚本自身的负向自检
   - 不得读取或输出 `backend/data/` 下的凭据类文件（见 3.1）；
   - 涉及长连接（SSE）的验证必须用真实 `uvicorn` 子进程 + `requests` 流式读取，
     **不要**用 `TestClient`（长连接无法安全中断，会让脚本挂起）；
-  - 关键字断言要避开「请求日志中间件会记录查询 URL 自身」这一自我匹配陷阱。
+  - 关键字断言要避开「请求日志中间件会记录查询 URL 自身」这一自我匹配陷阱；
+  - **只在系统临时目录里建沙盒**，不要为了「干净环境」去删改真实用户数据；
+  - 输出标记统一用 `[PASS]` / `[FAIL]`（ASCII），便于在 GBK 控制台与 CI 日志中稳定阅读。
 
 - **`tests/README.md` 已重写为与当前脚本一致**；其中提及的 `simple_test.py`、`load_test.py`、`realistic_load_test.py` 是 v1.0.20 被有意移除的旧压测脚本，**不要**试图恢复或臆造。
 - 「(待补充：测试框架与最低覆盖率要求)」——如需引入正式测试框架，请先与维护者确认。
@@ -376,11 +397,28 @@ node tests\check_api_wiring_selftest.cjs   # 校验脚本自身的负向自检
 
 | action | 前置能力 | 约束 |
 |---|---|---|
-| `python` | `allow_python` | `PYTHON_MODULE_ALLOWLIST` 模块白名单 + `PYTHON_FORBIDDEN` 片段黑名单双重校验；**禁止**下划线开头的属性访问（阻断 `__class__` / `__globals__` 逃逸）；沙箱 `__builtins__` 仅暴露安全内建 |
+| `python` | `allow_python` | **命名空间隔离 + 关键词黑名单双重校验**：沙箱只注入 `PYTHON_SAFE_NAMESPACES` 里显式列出的**只读属性**（如 `os.getcwd`、`os.sep`），**不注入模块对象本身**；黑名单 `PYTHON_FORBIDDEN` 作第一道粗筛；**禁止**下划线开头的私有属性访问（阻断 `__class__` / `__globals__` 逃逸）；沙箱 `__builtins__` 仅暴露安全内建 |
 | `shell` | `allow_shell` | 必须整体匹配 `SHELL_WHITELIST` 正则（`ipconfig` / `systeminfo` / `tasklist` / `netstat` / `ver` / `where` / `ping -n` / `nslookup` / `dir` / `echo`）；**禁止** `& \| ; > < \` $` 与换行；硬超时 `COMMAND_TIMEOUT = 20` 秒；输出截断 `OUTPUT_LIMIT = 20000` 字符 |
 | `db_query` | 无（默认允许） | 仅单条 `SELECT`；命中 `_FORBIDDEN_SQL`（insert/update/delete/drop/alter/create/pragma/vacuum/…）或出现多语句一律拒绝；最多返回 200 行 |
 
-**改动白名单时必须同步**：`debug_service.ALLOWED_ACTIONS` / `SHELL_WHITELIST` / `PYTHON_MODULE_ALLOWLIST` / `PYTHON_FORBIDDEN`，
+> **为什么 `python` 动作必须做命名空间隔离（v1.0.24 血泪教训）**
+>
+> 早期实现把**完整模块对象**注入 `eval` 命名空间，再用关键词黑名单拦截危险写法。
+> 这在一开始就注定不安全：黑名单只逐词匹配了 `subprocess.popen`（小写），
+> 而 `subprocess` 模块本身是可用的，于是
+> `subprocess.run("shutdown /s /t 0", shell=True)` 通过了全部检查 ——
+> **仅开启「表达式执行」即可执行任意系统命令**，彻底绕过独立的「命令执行」闸门
+> （`SHELL_WHITELIST`、`COMMAND_TIMEOUT`、审计标签全部失效）。
+>
+> 结论（新增受控执行能力时必须遵守）：
+> 1. **白名单要落在「值」上，不能落在「名字」上**：决定暴露哪个具体函数，而不是暴露模块后去猜有哪些危险方法；
+> 2. **黑名单只能当粗筛**，字符串匹配极易被大小写、拼接、属性链绕过，永远不能作为唯一防线；
+> 3. 新增 allowlist 模块时，**必须同时**在 `PYTHON_SAFE_NAMESPACES` 中逐项列出允许的属性，
+>    并在 `tests/verify_backend_v1021.py` 第 3 节补一条「越权必须被拒绝」的断言
+>    （现有断言：`subprocess.run` / `subprocess.Popen` / `subprocess.check_output` /
+>    `os.popen` / `shutil.rmtree` / `sys.modules` 六种逃逸必须全部返回 400）。
+
+**改动白名单时必须同步**：`debug_service.ALLOWED_ACTIONS` / `SHELL_WHITELIST` / `PYTHON_MODULE_ALLOWLIST` / `PYTHON_SAFE_NAMESPACES` / `PYTHON_FORBIDDEN`，
 以及 `tests/verify_backend_v1021.py` 第 3 节的对应断言（危险表达式拦截、非白名单命令拦截、写操作 SQL 拦截）。
 
 #### 2.6.4 安全红线
@@ -459,8 +497,17 @@ node tests\check_api_wiring_selftest.cjs   # 校验脚本自身的负向自检
   - 对应 HTTP 接口：`POST /api/system/shutdown`、`POST /api/system/sleep`
 - **恢复出厂设置**：`POST /api/system/factory-reset` → `execute_factory_reset()`，会遍历删除 `DATA_DIR` 下 stickers/backgrounds/particles/covers/downloads/fonts/img_cache 中的文件，并清空 `Video`、`Collection`、`Tag`、非默认 `Theme`、`PlayRecord`、`DailyStat` 表，同时删除 Cookie 与用户信息文件（`backend/services/system_service.py` 第 33-95 行）。
 - **卸载应用**：Electron IPC `uninstall-app` 会调用同目录下的 `Uninstall BiliMusic.exe`（`frontend/main.cjs` 第 222-238 行）。
+- **卸载时删除 AppData**：`frontend/installer.nsh` 的 `customUnInstall` 只有在用户于弹窗中**明确选择删除数据**（`$R9 = "0"`）时才执行 `RMDir /r "$APPDATA\BiliMusic"`。
+  **不要**在 `frontend/package.json` 的 `nsis` 段重新加回 `"deleteAppDataOnUninstall": true`：该开关会定义 `DELETE_APP_DATA_ON_UNINSTALL`，
+  使 electron-builder 模板**无条件**清空 `%APPDATA%\BiliMusic`（它从不读取 `$R9`），于是用户「保留数据」的选择被静默忽略，
+  丢掉的正是 `localStorage` 中的设置/主题/播放队列与 IndexedDB `BiliMusicDB`。v1.0.24 已移除该开关，改为以显式弹窗 + `$R9` 为准。
 - **删除用户媒体文件**：`os.remove` / `RMDir` 相关逻辑，包括 `cleanup_service` 的缓存清理与 `system_service` 的重置流程。
-- **安装器清理宏**：`frontend/build/afterPack.cjs` 生成的 `customRemoveFiles` / `cleanOldFiles` 宏包含 `RMDir /r "$INSTDIR"`，错误的改动会导致用户数据在升级时被清空——这正是 `CHANGELOG.md` 1.0.20 记录过的致命缺陷，修改前必须先读该条目。
+- **安装器清理宏**：`frontend/build/afterPack.cjs` 生成 `frontend/build/uninstall_list.nsh` 中的 `customRemoveFiles` / `cleanOldFiles` 宏。
+  **正确形态**：`RMDir /r "$INSTDIR"` **只允许出现在 `customRemoveFiles` 的 `$R9 == "0"` 分支内**（即用户明确要求删除数据）；
+  正常升级路径（`$R9 == "1"`）必须走 `${Else}` 分支——逐个 `Rename` 旧程序文件到 `$PLUGINSDIR\old-install`，再用**不带 `/r`** 的 `RMDir` 清理已空目录。
+  `cleanOldFiles`（旧版不支持保留数据时的降级路径）**同样不得**包含 `RMDir /r`。
+  用户数据位于 `$INSTDIR\resources\backend\data`；正因为 `RMDir` 不带 `/r`、且该目录非空，升级才删不掉它。
+  这两条不变量由 `tests/verify_update_overwrite.cjs` 断言，改完必须跑。
 - **Git 破坏性命令**：`git reset --hard`、`git push --force`（`--force-with-lease` 亦然）、`git clean -fdx`、`git rebase` / `commit --amend` 改写已推送历史、`git branch -D`。仓库是真实的 Git 仓库并跟踪 `origin/main`，且 `.git/logs/HEAD` 显示历史上**已发生过 6 次 `reset` 丢弃提交**（被放弃的提交包括 `629b9d72`、`e2d75bec`、`6210a067`），说明这类操作在本项目中确实造成了内容丢失。Agent **不应**自行执行上述命令；确有必要时，先向维护者说明将丢弃哪些提交。
 
 ### 3.3 网络安全边界
@@ -551,10 +598,15 @@ node tests\check_api_wiring_selftest.cjs   # 校验脚本自身的负向自检
 
 ### 4.4 提交内容约定（从项目文件推断）
 
-- **版本号同步**：发版提交（`release:` 或 `vX.Y.Z`）应同时更新 `frontend/package.json` 的 `version`（版本号单一真实来源，见 2.1）、`CHANGELOG.md` 的新条目标题、以及 `README.md` 第 8 行徽章。当前 `README.md` 徽章为 `1.0.19` 而 `package.json` 为 `1.0.20`，二者已不一致——如要对齐请作为独立改动处理。
-- **必须同步更新的文件**：修改用户可见行为时更新 `CHANGELOG.md`（历史上存在专门的 `docs:` 提交用于补齐 CHANGELOG）；修改配置项时同步 `config.yaml`、`docs/配置说明.md` 与 `backend/core/config.py` 的默认值。
-- **不要提交**：`frontend/node_modules/`、`frontend/dist/`、`frontend/release/`、`dist/`、`.venv/`、`__pycache__/`、`*.log`、`config.yaml`、`backend/data/`（依据根 `.gitignore` 第 1-33 行）。其中 `config.yaml` 与 `backend/data/` 的忽略是**有意的凭据保护**（见 3.1），不要用 `git add -f` 强行加入。
-- **注意 `.gitignore` 与已跟踪文件的区别**：`.gitignore` 对**已被跟踪**的文件无效。根 `.gitignore` 第 11 行的 `*.spec` 会阻止新增 spec 文件被跟踪，但已存在的 `backend.spec` 属于 PyInstaller 自动生成物（`build.bat` 通过命令行参数而非 `.spec` 打包），**不要把它当作构建的权威配置**——真正的打包定义在 `build.bat`。
+- **版本号同步**：发版提交（`release:` 或 `vX.Y.Z`）应同时更新 `frontend/package.json` 的 `version`（版本号单一真实来源，见 2.1）、`CHANGELOG.md` 的新条目标题、以及 `README.md` 第 8 行徽章。**这三处必须一致**——历史上 `README.md` 徽章曾长期停留在 `1.0.19` 而 `package.json` 已到 `1.0.20`，v1.0.24 已一并对齐为 `1.0.24`，请勿再让它们漂移。
+- **必须同步更新的文件**：修改用户可见行为时更新 `CHANGELOG.md`（历史上存在专门的 `docs:` 提交用于补齐 CHANGELOG）；修改配置项时同步 `config.yaml`、`config.yaml.example`、`docs/配置说明.md` 与 `backend/core/config.py` 的 `_get_default_config()`——**默认值必须与 `config.yaml.example` 逐键一致**（`logging` 整段曾在默认值里缺失，导致回退到默认配置时日志保留策略静默失效）。
+- **不要提交**：`frontend/node_modules/`、`frontend/dist/`、`frontend/release/`、`dist/`、`.venv/`、`__pycache__/`、`*.log`、`config.yaml`、`backend/data/`（依据根 `.gitignore`）。其中 `config.yaml` 与 `backend/data/` 的忽略是**有意的凭据保护**（见 3.1），不要用 `git add -f` 强行加入。
+- **注意 `.gitignore` 与已跟踪文件的区别**：`.gitignore` 对**已被跟踪**的文件无效。根 `.gitignore` 的 `*.spec` 会阻止新增 spec 文件被跟踪，但已存在的 `backend.spec` 属于 PyInstaller 自动生成物（`build.bat` 通过命令行参数而非 `.spec` 打包），**不要把它当作构建的权威配置**——真正的打包定义在 `build.bat`。
+- **`frontend/build/` 的特例（v1.0.24 修复）**：根 `.gitignore` 的 `build/` 规则会**连带忽略 `frontend/build/`**，而该目录放着打包必需资源。因此 `.gitignore` 末尾有显式的反向规则，**只放开两个文件**：
+  - `!frontend/build/afterPack.cjs` —— `frontend/package.json` 的 `build.afterPack` 直接引用，缺失时 electron-builder **打包直接失败**；
+  - `!frontend/build/icon.ico` —— `buildResources` 目录资源。
+  而 `frontend/build/uninstall_list.nsh` 是 `afterPack.cjs` 的**生成物**，被显式忽略且**不应入库**（electron-builder 先跑 `afterPack` 再编译 NSIS，新旧不一致的清单反而会导致升级行为与代码不符）。
+  **不要**把 `frontend/build/` 整体加回忽略列表，也不要把生成的 `.nsh` 提交进去。
 
 ### 4.5 无法确认、需维护者补充的项目
 

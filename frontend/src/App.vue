@@ -28,7 +28,7 @@ const ParticleEngine = defineAsyncComponent(() => import('./components/ParticleE
 const CollectionSelectModal = defineAsyncComponent(() => import('./components/CollectionSelectModal.vue'))
 const VideoPreviewModal = defineAsyncComponent(() => import('./components/VideoPreviewModal.vue'))
 
-import { SparklesIcon, ArrowRightOnRectangleIcon, UserIcon, MusicalNoteIcon, SpeakerWaveIcon, SpeakerXMarkIcon, PowerIcon } from '@heroicons/vue/24/solid'
+import { SparklesIcon, ArrowRightOnRectangleIcon, UserIcon, MusicalNoteIcon, SpeakerWaveIcon, SpeakerXMarkIcon, PowerIcon, CheckIcon } from '@heroicons/vue/24/solid'
 import { ICON_ANNUAL_VIP } from './assets/icons'
 
 const store = usePlayerStore()
@@ -551,7 +551,7 @@ watch(() => settingsStore.settings.videoFitMode, () => { syncVideoElement() })
              'bg-green-500/90 border-green-600 text-white': store.toast.type === 'success'
            }">
         <div v-if="store.toast.type === 'error'" class="w-5 h-5 rounded-full bg-white text-red-500 flex items-center justify-center font-bold">!</div>
-        <div v-if="store.toast.type === 'success'" class="w-5 h-5 rounded-full bg-white text-green-500 flex items-center justify-center font-bold">✓</div>
+        <div v-if="store.toast.type === 'success'" class="w-5 h-5 rounded-full bg-white text-green-500 flex items-center justify-center font-bold"><CheckIcon class="w-3.5 h-3.5" /></div>
         <span class="text-sm font-bold tracking-tight">{{ store.toast.msg }}</span>
       </div>
     </transition>

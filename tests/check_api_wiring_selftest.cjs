@@ -50,8 +50,8 @@ console.log()
 
 const detected = exitWithBug !== 0 && /未携带 X-Debug-Token|首个参数不是调试令牌/.test(outputWithBug)
 console.log(detected
-  ? `✓ 负向测试通过：检查脚本成功检出该缺陷（退出码 ${exitWithBug}）`
-  : `✗ 负向测试失败：检查脚本未能检出该缺陷（退出码 ${exitWithBug}）`)
+  ? `[PASS] 负向测试通过：检查脚本成功检出该缺陷（退出码 ${exitWithBug}）`
+  : `[FAIL] 负向测试失败：检查脚本未能检出该缺陷（退出码 ${exitWithBug}）`)
 
 // 恢复后再次确认一切正常
 try {
@@ -59,9 +59,9 @@ try {
     [path.join(__dirname, 'check_api_wiring.cjs')],
     { cwd: path.join(__dirname, '..'), encoding: 'utf8' })
   console.log(out.trim())
-  console.log('✓ 恢复后检查通过')
+  console.log('[PASS] 恢复后检查通过')
 } catch (e) {
-  console.log('✗ 恢复后检查未通过：')
+  console.log('[FAIL] 恢复后检查未通过：')
   console.log(((e.stdout || '') + (e.stderr || '')).trim())
   process.exit(1)
 }

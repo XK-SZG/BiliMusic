@@ -39,6 +39,12 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA synchronous=NORMAL")
+    # [修复] SQLite 默认不启用外键约束，必须逐连接显式打开，
+    # 否则 models.py 里所有 ondelete="CASCADE" 都只是注释：
+    #   - 删除视频后 play_records / collection_video / video_tag 会留下孤儿行；
+    #   - 音频/视频播放统计会统计到已不存在的媒体。
+    # SQLite 的连接默认值即为 OFF，故必须在每次建立连接时设置（连接池会复用连接）。
+    cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

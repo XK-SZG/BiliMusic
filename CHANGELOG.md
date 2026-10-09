@@ -2,6 +2,218 @@
 
 所有对本项目的显著更改都将记录在此文件中。
 
+## [1.0.24] - 2026-10-09
+
+### 🐛 缺陷修复 (Bug Fixes)
+
+#### 打包版永远读不到 config.yaml，用户配置在安装版上全部失效
+
+- **问题描述**：安装版（`backend.exe`）里改端口、改缓存上限、改日志保留策略都没有效果，
+  日志系统始终按内置默认值跑（`config.yaml` 的 `logging` 段完全不生效）。
+- **根本原因**：`run_backend.py` 的 `find_config_file()` 明明找到了配置并写入
+  `os.environ['BILIMUSIC_CONFIG_PATH']`，但 `backend/core/config.py` **从未读取这个环境变量**，
+  其默认值又只是相对路径 `"config.yaml"`（相对进程工作目录）。开发环境下工作目录恰好是仓库根目录，
+  所以看起来正常；打包后工作目录是 `resources/backend`，于是必然回落到默认配置。
+- **修复方式**：新增 `resolve_config_path()`，按「显式参数 → `BILIMUSIC_CONFIG_PATH` →
+  exe 同级目录 → `sys._MEIPASS` → 仓库根目录 → 当前工作目录」的顺序解析；
+  `Config.__init__` 改为使用它。涉及 [`backend/core/config.py`](backend/core/config.py)。
+
+#### 内置默认配置缺少整个 `logging` 段
+
+- **问题描述**：当 `config.yaml` 不存在或损坏而回退到默认值时，日志保留策略与
+  `download.keep_failed_files` 会静默变成硬编码兜底值，与
+  [`config.yaml.example`](config.yaml.example) 及
+  [`docs/配置说明.md`](docs/配置说明.md) 的承诺不一致。
+- **修复方式**：`_get_default_config()` 补齐 `logging` 整段与 `download.keep_failed_files`，
+  现与 `config.yaml.example` **逐键一致**（已由自检脚本比对，无缺键、无多余键、无取值差异）。
+  另新增 `Config.from_defaults()` 以便自检可直接验证默认值分支。
+
+#### 配置里的字符串布尔值被当成 true（`bool("false") == True`）
+
+- **问题描述**：`config.yaml` 写成 `console: "false"` 或 `keep_failed_files: "0"` 时，
+  `bool("false")`、`bool("0")` 都是 `True`，用户以为关掉了行为，实际仍然开着。
+- **修复方式**：新增 [`backend/core/utils.py`](backend/core/utils.py) 的 `as_bool()`，
+  显式识别 `false/0/no/off/none/null/空串` 为假值；`log_manager` 与 `download_service` 改用它。
+
+#### SQLite 从未启用外键约束，`ondelete="CASCADE"` 全部形同注释
+
+- **问题描述**：删除视频或媒体夹后，`play_records`、`collection_video`、`video_tag`
+  会留下**孤儿行**，导致播放统计把已不存在的媒体算进去。
+- **根本原因**：SQLite 的外键约束**每个连接都必须显式 `PRAGMA foreign_keys=ON`**
+  （且默认值为 OFF），而 `backend/database/db.py` 的连接钩子只设置了 WAL 与 synchronous。
+- **修复方式**：在连接钩子中补上 `PRAGMA foreign_keys=ON`。
+  `services/system_service.py` 的重置逻辑删除顺序（Video → Collection → Tag → …）
+  已满足外键约束要求，无需调整。
+
+#### 启动校验会整段跳过待修复的下载记录
+
+- **问题描述**：启动时「校验已下载文件」的后台线程用 `LIMIT/OFFSET` 分页遍历
+  `download_status == 'completed'`，但循环体本身会把校验失败的记录改成 `not_downloaded`，
+  结果集在翻页过程中不断变短，`offset` 递增后**整段跳过**——部分文件已丢失的记录
+  永远不会被重置，界面长期显示「已下载」却播放无声。
+- **修复方式**：改为按主键推进的游标分页（`bvid > 游标`），过滤条件不随状态改写而变化，
+  逐行且不遗漏。涉及 [`backend/main.py`](backend/main.py)。
+
+#### 日统计日期口径不一致（`utcnow` 与 `now` 混用）
+
+- **问题描述**：`stats.py` 的三个统计接口用 `datetime.now()` 归属日期，
+  而 `async_metrics.py` 与 `download_service.py` 用 `datetime.utcnow()`。
+  在 UTC+8 等时区，凌晨 0:00–8:00 产生的流量会被写到**前一天**，
+  导致日统计、作息曲线与排行榜对不上。
+- **修复方式**：统一改用 `datetime.now()`。同时为 `DailyStat` 的累加补上 `or 0` 保护
+  （历史行可能因补列而为 NULL，直接 `+=` 会抛 `TypeError`）。
+
+#### 字体上传可目录穿越写任意文件
+
+- **问题描述**：`POST /api/system/fonts/upload` 直接把客户端提供的 `file.filename`
+  拼进路径（`os.path.join(fonts_dir, file.filename)`）。上传名为 `..\..\config.yaml`
+  之类的文件即可把内容写到**数据目录之外**（字体、贴纸、背景、粒子四个上传接口里
+  只有字体接口漏了防护，其余都加了 `uuid` 前缀或做了路径校验）。
+- **修复方式**：只取纯文件名（`os.path.basename` 并归一化反斜杠），
+  再用 `os.path.dirname(file_path) != fonts_dir` 做绝对路径前缀二次校验。
+  涉及 [`backend/routers/system.py`](backend/routers/system.py)。
+
+#### 导入会话 id 可导致任意目录被整棵删除
+
+- **问题描述**：`POST /api/library/import/execute` 的 `session_id` 直接来自请求体且
+  **没有任何校验**，`backup_service` 用它拼出临时目录：
+  `os.path.join(tempfile.gettempdir(), f"bilimusic_import_{session_id}")`。
+  传入 `x/../../../../../../Users/<用户>/Documents` 时，Windows 会按词法归一化 `..`，
+  该路径**真实存在**；随后打开其中的 `metadata.json` 失败，异常分支调用
+  `remove_temp_file()` → `shutil.rmtree()`，**把整个目录删掉**（不可恢复）。
+- **修复方式**：新增 `resolve_import_temp_dir()`，要求 `session_id` 不含路径分隔符与
+  `..`（`^[A-Za-z0-9_-]{8,64}$`），并确认解析结果确实位于系统临时目录之内且带导入前缀；
+  `remove_temp_file()` 也加了同等的归属校验（拒绝清理临时目录之外的任何路径）。
+  涉及 [`backend/services/backup_service.py`](backend/services/backup_service.py)。
+
+#### 备份导出的 `save_path` 可覆盖/删除任意文件
+
+- **问题描述**：`POST /api/library/export` 的 `save_path` 被直接当作 ZIP 输出路径：
+  `zipfile.ZipFile(temp_path, 'w')` 会**截断任何已存在的文件**（例如用户文档），
+  而打包失败时的 `os.remove(temp_path)` 会把那个文件彻底删掉。没有扩展名、存在性、
+  是否目录的任何校验。正常界面走 Electron 保存对话框，所以普通用户碰不到。
+- **修复方式**：要求 `.zip` 结尾、拒绝目录、目标已存在时返回 `409` 要求另选路径。
+
+#### 主题包导入可目录穿越写任意文件（zip-slip）
+
+- **问题描述**：`import_theme_from_zip()` 只按 `/` 拆分压缩包成员名，且校验的是
+  「拆成几段」而不是名字本身。成员 `stickers/..\..\evil.exe` 会得到
+  `filename = "..\..\evil.exe"`，在 Windows 上写到 `<DATA_DIR>/stickers` 之外；
+  `zf.read(item)` 也没有体积上限（zip 炸弹）。主题包是用户之间互相分享的不可信输入。
+- **修复方式**：只取纯文件名、剥掉任何目录成分（`basename` + 反斜杠归一化），
+  用绝对路径归属二次校验，并新增 `MAX_THEME_MEMBER_BYTES = 50MB` 体积上限。
+  同时修正该函数把主动抛出的 `HTTPException(400)` 包装成 500 的问题
+  （`except HTTPException: raise` 前置）并补上 `rollback()`。
+
+#### 调试「表达式执行」可绕过「命令执行」闸门执行任意系统命令
+
+- **问题描述**：这是本次审查发现的**最严重**问题。`run_python_expression()` 把
+  **完整模块对象**注入 `eval` 命名空间，再用关键词黑名单拦截危险写法；
+  但黑名单只逐词匹配了 `subprocess.popen`（小写），而 `subprocess` 模块本身可用，于是
+  `subprocess.run("shutdown /s /t 0", shell=True)` 通过了全部检查。
+  只要用户在设置里勾选「表达式执行」，就能执行任意系统命令，
+  `SHELL_WHITELIST`、`COMMAND_TIMEOUT`、审计标签**全部失效**，
+  并且字符串拼接还能绕过 `bili_cookies` / `sessdata` 等凭据关键词拦截 ——
+  这与 `AGENTS.md` 2.6.3 / 3.3.1 声明的安全模型直接冲突。
+- **修复方式**：改为**命名空间隔离**——新增 `PYTHON_SAFE_NAMESPACES`，只为每个模块白名单
+  注入显式列出的**只读属性**（如 `os.getcwd`、`os.sep`、`sys.version`），
+  **不再注入模块对象本身**，因此 `subprocess.*` / `os.system` / `shutil.rmtree` /
+  `sys.modules` 在表达式里根本不存在；`subprocess`、`shutil` 也从
+  `PYTHON_MODULE_ALLOWLIST` 中移除，黑名单扩充为粗筛。
+  另修正「根对象」正则，使 `sys.version.split()[0]` 这类链式只读表达式不被误伤。
+  涉及 [`backend/core/debug_service.py`](backend/core/debug_service.py)。
+
+#### 多分集视频下载到的其实是第 1 集
+
+- **问题描述**：下载 `BVxxx_p3` 时，代码只设置 `ydl_opts['playlist_items'] = "3"`，
+  下载 URL 却是不带 `?p=` 的主链接。yt-dlp 的 B 站解析器是从 **URL 查询串**读取
+  `part_id` 的，且本项目为性能已设 `noplaylist=True`，解析器不会把选集展开成播放列表，
+  于是 `playlist_items` **始终不生效** —— P1 的视频流被写进 `BVxxx_p3.mp4`，
+  校验还会通过并标记为「已完成」，用户永久拿到错误的剧集且不会被重新下载。
+- **修复方式**：把集号写进 URL（`https://www.bilibili.com/video/{bvid}?p={n}`），
+  并移除无效的 `playlist_items`。涉及
+  [`backend/services/download_service.py`](backend/services/download_service.py)。
+
+#### 收藏夹同步 100% 失败（调用不存在的方法 + 元组解包数量错误）
+
+- **问题描述**：`GET /api/bili/sync/{media_id}` 依赖的
+  `BiliManager.stream_fav_content()` **在仓库中根本不存在**（也没有 `__getattr__`），
+  生成器第一次迭代就抛 `AttributeError`；由于响应头已以 `200 text/event-stream` 发出，
+  客户端只会看到一个被截断的流，且此前已创建的 `Collection` 行是空的。
+  即使补上该方法，紧随其后的
+  `pages, main_title, main_pic, owner_name = bili.get_video_parts(...)`
+  也只解包 4 个值，而该函数返回 **5** 个（第 5 个是 `owner_face`），
+  任何含多分集视频的收藏夹都会抛 `ValueError`。
+- **修复方式**：改为复用既有的分页接口 `get_folder_videos()` 逐页拉取（保持流式语义），
+  解包改为按索引取值；并把「未登录/接口报错」与「收藏夹为空」区分开，
+  前者现在会通过 SSE 发出明确的 error 帧而不是静默同步出空结果。
+  涉及 [`backend/services/sync_service.py`](backend/services/sync_service.py)。
+
+#### 数据库迁移失败被静默吞掉，错误系统收不到上报
+
+- **问题描述**：`run_migrations()` 捕获异常后只记录日志就返回，
+  导致 `backend/main.py` 的 `lifespan` 里
+  「迁移失败 → `report_exception(scope='database')`」分支**永远不会执行**。
+  用户升级后若迁移失败，界面不会有任何提示，而旧库缺少新列会让后续请求以各种
+  奇怪的 500 报错，极难定位。
+- **修复方式**：回滚后重新抛出，交由调用方登记到错误系统。
+
+#### 流量统计线程在首次写入失败时抛 `UnboundLocalError` 并永久停摆
+
+- **问题描述**：`backend/core/async_metrics.py` 的补偿逻辑写在 `except` 分支里，
+  但 `traffic_to_write` 只在 `try` 之前的分支内赋值。一旦首次落盘就失败，
+  `except` 中引用未绑定的局部变量会抛 `UnboundLocalError`；
+  由于该线程没有外层捕获，**流量统计线程就此永久退出**，此后所有流量都不再入库。
+- **修复方式**：异常处理改为记录告警并安全回滚缓冲区，不再引用可能未绑定的变量。
+
+### 🔧 技术改进
+
+#### 发行包「覆盖更新」数据安全：补上全新克隆无法打包的缺陷
+
+- **问题描述**：根 `.gitignore` 的 `build/` 规则会**连带忽略 `frontend/build/`**，
+  而该目录放着打包必需资源：
+  - `frontend/build/afterPack.cjs` —— `package.json` 的 `build.afterPack` 直接引用它，
+    缺失时 electron-builder **打包直接失败**；它正是负责生成 NSIS 覆盖更新宏的文件。
+  - `frontend/build/icon.ico` —— `buildResources` 目录资源。
+  也就是说：**全新克隆本仓库无法完成打包**，而「升级不丢数据」这一关键修复
+  （见 1.0.20）恰好依赖 `afterPack.cjs`。
+- **修复方式**：`.gitignore` 只放开这两个必须入库的资源；
+  `frontend/build/uninstall_list.nsh` 是 `afterPack.cjs` 的**生成物**，继续忽略
+  （electron-builder 会先执行 `afterPack` 再编译 NSIS，因此无需入库，
+  也避免新旧版本不一致导致升级清单过期）。
+
+#### 新增发行包覆盖更新沙盒验证脚本
+
+- 新增 [`tests/verify_update_overwrite.cjs`](tests/verify_update_overwrite.cjs)：
+  解析真实参与编译的 `uninstall_list.nsh`，按 NSIS 语义（`Rename` 目标已存在则失败、
+  `RMDir` 仅在空目录成功、`${If} $R9 == "0"` 分支选择）在系统临时目录的沙盒中
+  重演一次「覆盖升级」，断言用户数据与用户自建文件完好、程序文件确实被替换、
+  不存在旧文件挡住新文件；并内置**负向自检**（换成历史上有缺陷的
+  `RMDir /r "$INSTDIR"` 写法，确认脚本能检出数据丢失）。共 19 项断言。
+
+#### 移除代码与日志中的 emoji 特殊字符
+
+- 清理范围：**代码中的日志调用、注释与 docstring**（`backend/main.py` 的
+  `📡 [请求]` / `❌ [错误]`、`run_backend.py` 与 `backend/main.py` 的 `🔴` 诊断注释、
+  `frontend/main.cjs` 的两条 `console.log`）。
+- 前端界面里的装饰性 emoji 改用项目既有的 **Heroicons**（`💡`→`LightBulbIcon`、
+  `📄`→`DocumentTextIcon`、状态勾叉 `✓/✕`→`CheckCircleIcon`/`XCircleIcon`/`CheckIcon`）。
+- **明确保留**（不属于代码/日志噪声，见下方「判定依据」）：
+  `backend/routers/stats.py` 的作息人格 `icon` 字段——它会被
+  `Statistics.vue` 直接渲染成界面图标，属于**产品数据**而非代码噪声；
+  以及粒子文本默认值 `♪,♫,★,✨`（用户可见、可自定义的默认内容）。
+
+#### 其它小幅修正
+
+- `backend/main.py` 日志中间件里的 `raise e` 改为裸 `raise`，
+  否则异常链被重置、丢失真正的出错位置。
+- 已废弃的 `@app.on_event("shutdown")` 收敛进 `lifespan` 收尾段，
+  与启动逻辑对称，避免 `httpx.AsyncClient` 连接池未关闭。
+- `tests/check_api_wiring*.cjs` 的输出标记由 `✓/✗` 改为 `[PASS]/[FAIL]`，
+  与 `verify_backend_v1021.py`、`verify_update_overwrite.cjs` 统一。
+
+---
+
 ## [1.0.23] - 2026-10-09
 
 ### 🐛 缺陷修复 (Bug Fixes)

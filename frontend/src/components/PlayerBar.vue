@@ -265,7 +265,6 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener("click", closeAll);
   window.removeEventListener("keydown", handleVolumeKeydown);
-  if (timeInterval) clearInterval(timeInterval);
 });
 
 const closeAll = () => {

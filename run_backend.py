@@ -7,7 +7,7 @@ import traceback
 from datetime import datetime
 
 # ============================================================
-# 🔴 CRASH DIAGNOSTIC LOGGING — MUST BE SET UP BEFORE ANY IMPORT
+# CRASH DIAGNOSTIC LOGGING — MUST BE SET UP BEFORE ANY IMPORT
 # ============================================================
 # In frozen (PyInstaller) environment, if `from backend.main import app`
 # fails, we need to capture the traceback in a log file AND on stderr.

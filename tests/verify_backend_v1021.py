@@ -487,6 +487,28 @@ def run_all(client):
                           'payload': {'expression': 'open("x").read()'}})
     check('文件读取表达式被拦截', r.status_code == 400)
 
+    # [新增] v1.0.24：表达式沙箱原先注入了完整模块对象，且黑名单只逐词匹配
+    # `subprocess.popen`，因此 `subprocess.run(..., shell=True)` 能直接执行任意系统命令，
+    # 绕过独立的「命令执行」闸门（SHELL_WHITELIST / COMMAND_TIMEOUT / 审计标签）。
+    # 下列断言锁定「表达式执行不得等价于任意命令执行」这一不变量。
+    for expr, label in (
+        ('subprocess.run("echo pwned", shell=True)', 'subprocess.run 逃逸被拦截'),
+        ('subprocess.Popen("echo pwned")', 'subprocess.Popen 逃逸被拦截'),
+        ('subprocess.check_output(["cmd", "/c", "echo"])', 'subprocess.check_output 逃逸被拦截'),
+        ('os.popen("echo pwned").read()', 'os.popen 逃逸被拦截'),
+        ('shutil.rmtree("C:/Windows/Temp")', 'shutil.rmtree 逃逸被拦截'),
+        ('sys.modules', 'sys.modules 逃逸被拦截'),
+    ):
+        r = client.post('/api/debug/action', headers=H,
+                        json={'action': 'python', 'payload': {'expression': expr}})
+        check(label, r.status_code == 400, r.text[:120])
+
+    # 链式只读表达式必须仍然可用（修复「根对象」正则后不应产生回归）
+    r = client.post('/api/debug/action', headers=H,
+                    json={'action': 'python',
+                          'payload': {'expression': 'sys.version.split()[0]'}})
+    check('链式只读表达式仍可执行（未被根对象校验误伤）', r.status_code == 200, r.text[:120])
+
     r = client.post('/api/debug/action', headers=H,
                     json={'action': 'shell', 'payload': {'command': 'echo hello'}})
     check('白名单命令可执行', r.status_code == 200, r.text[:120])
@@ -525,6 +547,96 @@ def run_all(client):
     check('调试模式可关闭', r.status_code == 200)
     check('关闭后令牌立即失效',
           client.get('/api/debug/ping', headers=H2).status_code == 403)
+
+    # ----------------------------------------------------------
+    section('3.1 路径穿越防护（v1.0.24 修复）')
+    # ----------------------------------------------------------
+    # [新增] 原先有两处可被「客户端提供的路径片段」写到数据目录之外，
+    # 另有一处能把任意目录整棵删除。断言锁定「恶意输入必须被拒绝」。
+    from backend.services.backup_service import resolve_import_temp_dir, remove_temp_file
+    from fastapi import HTTPException as _HTTPException
+
+    hostile_session_ids = [
+        'x/../../../../../../Windows/Temp',
+        '..',
+        '../../../..',
+        r'x\..\..\..\Windows',
+    ]
+    for sid in hostile_session_ids:
+        try:
+            resolve_import_temp_dir(sid)
+            check(f'非法导入会话 id 被拒绝 ({sid[:24]})', False, '未拒绝')
+        except _HTTPException:
+            check(f'非法导入会话 id 被拒绝 ({sid[:24]})', True)
+
+    valid_session_id = '0123456789abcdef0123456789abcdef'
+    resolved = resolve_import_temp_dir(valid_session_id)
+    import tempfile as _tempfile
+    check('合法导入会话 id 解析到系统临时目录内',
+          os.path.dirname(resolved) == os.path.realpath(_tempfile.gettempdir()),
+          resolved)
+
+    # remove_temp_file 不得删除临时目录之外的任何路径
+    outside_probe = os.path.join(ROOT, 'tests', '__should_not_be_deleted__')
+    os.makedirs(outside_probe, exist_ok=True)
+    remove_temp_file(outside_probe)
+    check('remove_temp_file 拒绝删除临时目录之外的路径', os.path.isdir(outside_probe))
+    try:
+        os.rmdir(outside_probe)
+    except Exception:
+        pass
+
+    # 主题包 zip-slip：越界成员名不得在数据目录之外落盘。
+    # 直接构造恶意 zip 走真实导入函数，然后检查「应被写到目录外」的探针文件是否存在。
+    import asyncio as _asyncio
+    from backend.services.theme_service import import_theme_from_zip
+    from backend.core.paths import DATA_DIR as _DATA_DIR
+
+    escaped_probes = [
+        os.path.abspath(os.path.join(_DATA_DIR, '__zip_slip_probe__.txt')),
+        os.path.abspath(os.path.join(os.path.dirname(_DATA_DIR), '__zip_slip_probe2__.txt')),
+        os.path.abspath(os.path.join(_DATA_DIR, '..', '__zip_slip_probe__.txt')),
+        os.path.abspath(os.path.join(os.path.dirname(_DATA_DIR), 'stickers', '__zip_slip_probe__.txt')),
+    ]
+    for p in escaped_probes:
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+    evil_zip_bytes = io.BytesIO()
+    with zipfile.ZipFile(evil_zip_bytes, 'w') as zf:
+        zf.writestr('theme.json', json.dumps({'name': 'zip-slip 探针', 'settings': {}}))
+        zf.writestr('stickers/..\\..\\__zip_slip_probe__.txt', b'pwned')
+        zf.writestr('stickers/../../__zip_slip_probe2__.txt', b'pwned')
+
+    class _FakeUpload:
+        filename = 'evil.zip'
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        async def read(self):
+            return self._payload
+
+    try:
+        from backend.database.db import SessionLocal as _SessionLocal
+        with _SessionLocal() as _theme_db:
+            _asyncio.new_event_loop().run_until_complete(
+                import_theme_from_zip(_FakeUpload(evil_zip_bytes.getvalue()), _theme_db))
+    except Exception as _e:
+        # 允许因其它原因失败（例如主题校验），重点是「不得越界落盘」
+        print(f'  （主题导入返回异常，属可接受：{type(_e).__name__}）')
+
+    escaped_hit = [p for p in escaped_probes if os.path.exists(p)]
+    check('主题包 zip-slip 未越界落盘（反斜杠与 ../ 两种载荷）', not escaped_hit,
+          f'越界文件: {escaped_hit}' if escaped_hit else '')
+    for p in escaped_hit:
+        try:
+            os.remove(p)
+        except Exception:
+            pass
 
     # ----------------------------------------------------------
     section('4. 下载系统（Errno 22 修复）')

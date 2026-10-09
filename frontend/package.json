@@ -1,7 +1,7 @@
 {
   "name": "bili-music",
   "private": true,
-  "version": "1.0.23",
+  "version": "1.0.24",
   "description": "BiliMusic - A Bilibili Music Player",
   "author": "XK",
   "main": "main.cjs",
@@ -69,8 +69,7 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "BiliMusic",
-      "include": "installer.nsh",
-      "deleteAppDataOnUninstall": true
+      "include": "installer.nsh"
     }
   }
 }

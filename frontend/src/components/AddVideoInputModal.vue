@@ -1,6 +1,6 @@
 <script setup>
 import { ref, watch } from 'vue'
-import { XMarkIcon, LinkIcon } from '@heroicons/vue/24/solid'
+import { XMarkIcon, LinkIcon, LightBulbIcon } from '@heroicons/vue/24/solid'
 import systemApi from '../api/system'
 
 const props = defineProps({
@@ -93,7 +93,7 @@ function handleKeydown(e) {
           
           <div class="bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/20 rounded-xl p-3">
             <div class="text-xs text-blue-700 dark:text-blue-300 space-y-1">
-              <div class="font-bold mb-1">💡 提示</div>
+              <div class="font-bold mb-1 flex items-center gap-1.5"><LightBulbIcon class="w-3.5 h-3.5 shrink-0" /> 提示</div>
               <div>• 支持分集视频（如 ?p=2）</div>
               <div>• 可以粘贴完整链接或纯 BV 号</div>
               <div>• 系统会自动提取第一个匹配的 BV 号</div>

@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import uuid
 import shutil
@@ -7,6 +8,7 @@ import zipfile
 import io
 import logging
 from typing import List, Set
+from fastapi import HTTPException
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 from ..database import models
@@ -14,13 +16,60 @@ from . import cleanup_service
 
 logger = logging.getLogger(__name__)
 
+#: 导入会话 id 的合法形态：只允许字母/数字/下划线/连字符，长度有界。
+#: 关键约束是「不得含路径分隔符与 `..`」，真正的安全边界由
+#: resolve_import_temp_dir() 的路径归属校验保证。
+_SESSION_ID_RE = re.compile(r'^[A-Za-z0-9_-]{8,64}$')
+
+#: 导入会话临时目录的前缀
+_IMPORT_TEMP_PREFIX = 'bilimusic_import_'
+
+
+def resolve_import_temp_dir(session_id: str) -> str:
+    """把客户端传来的 session_id 解析成**受控**的临时目录路径。
+
+    [修复] 原实现直接拼接：
+        temp_dir = os.path.join(tempfile.gettempdir(), f"bilimusic_import_{session_id}")
+    session_id 来自请求体且没有任何校验，`os.path.join` 又接受 `/` 与 `..`。
+    传 `x/../../../../../../Users/<user>/Documents` 时，Windows 会按词法归一化
+    `..`，该路径真实存在，随后 execute_import_logic 的异常分支会调用
+    `remove_temp_file()` -> `shutil.rmtree()`，**整目录被删除**（不可恢复）。
+    这里强制要求 session_id 不含路径分隔符与 `..`，并再次确认解析结果确实位于
+    系统临时目录之内、且目录名带导入前缀，否则一律按「会话无效」拒绝。
+    """
+    sid = (session_id or '').strip()
+    if not _SESSION_ID_RE.match(sid):
+        raise HTTPException(status_code=400, detail="导入会话已过期或无效")
+
+    temp_root = os.path.realpath(tempfile.gettempdir())
+    temp_dir = os.path.realpath(os.path.join(temp_root, f"{_IMPORT_TEMP_PREFIX}{sid}"))
+    # 双重确认：解析后的路径必须仍在临时目录内，且目录名就是期望的那个
+    if os.path.dirname(temp_dir) != temp_root:
+        raise HTTPException(status_code=400, detail="导入会话已过期或无效")
+    if not os.path.basename(temp_dir).startswith(_IMPORT_TEMP_PREFIX):
+        raise HTTPException(status_code=400, detail="导入会话已过期或无效")
+    return temp_dir
+
+
 def remove_temp_file(path: str):
+    """删除临时文件/目录。
+
+    仅允许删除**系统临时目录之内**的、以导入前缀命名的目录，
+    避免任何调用点误传路径导致误删用户数据。
+    """
     try:
-        if os.path.exists(path):
-            if os.path.isdir(path):
-                shutil.rmtree(path)
-            else:
-                os.remove(path)
+        if not path:
+            return
+        target = os.path.realpath(path)
+        temp_root = os.path.realpath(tempfile.gettempdir())
+        if os.path.dirname(target) != temp_root or \
+                not os.path.basename(target).startswith(_IMPORT_TEMP_PREFIX):
+            logger.warning(f"拒绝清理非导入临时目录的路径: {path}")
+            return
+        if os.path.isdir(target):
+            shutil.rmtree(target)
+        elif os.path.exists(target):
+            os.remove(target)
     except Exception as e:
         logger.error(f"清理临时文件失败: {path}, {e}")
 
@@ -99,7 +148,18 @@ def export_library_to_zip(
     logger.info(f"开始执行全量打包任务, export_library={export_library}, export_type={export_type}, 目标集合数: {len(collection_ids)}")
     start_time = time.time()
 
+    # [修复] save_path 来自请求体，原先被直接当成 ZIP 输出路径：
+    #   - `zipfile.ZipFile(temp_path, 'w')` 会**截断任何已存在的文件**（例如用户文档）；
+    #   - 打包失败时 `os.remove(temp_path)` 会把那个文件直接删掉。
+    # 正常界面走 Electron 保存对话框，这里补上基本校验，避免把服务端接口变成
+    # 「覆盖/删除任意文件」的入口。
     if save_path:
+        if os.path.isdir(save_path):
+            raise HTTPException(status_code=400, detail="保存路径不能是目录")
+        if not save_path.lower().endswith('.zip'):
+            raise HTTPException(status_code=400, detail="保存路径必须以 .zip 结尾")
+        if os.path.exists(save_path):
+            raise HTTPException(status_code=409, detail="目标文件已存在，请另选保存路径")
         temp_path = save_path
         logger.info(f"使用用户指定的保存路径: {temp_path}")
     else:
@@ -177,6 +237,13 @@ def export_library_to_zip(
         # 捕获 BaseException 以拦截 asyncio.CancelledError 等底层异常
         logger.error(f"打包过程发生严重异常: {type(e).__name__} - {e}")
         logger.error(f"异常堆栈: {traceback.format_exc()}")
+        # [修复] tracemalloc 原先只在成功路径 stop()。导出失败一次后，内存分配追踪
+        # 会在整个进程生命周期内保持开启：每个请求都额外付出追踪开销，
+        # 且下次导出打印的「峰值内存」不再代表真实峰值。
+        try:
+            tracemalloc.stop()
+        except Exception:
+            pass
         if not save_path:
             remove_temp_file(temp_path)
         else:
@@ -189,7 +256,8 @@ def export_library_to_zip(
 
 def analyze_import_zip(file_content: bytes, db_session: Session):
     session_id = uuid.uuid4().hex
-    temp_dir = os.path.join(tempfile.gettempdir(), f"bilimusic_import_{session_id}")
+    # 复用同一套解析逻辑，保证「生成」与「消费」两侧对临时目录的约束完全一致
+    temp_dir = resolve_import_temp_dir(session_id)
     os.makedirs(temp_dir, exist_ok=True)
     
     zip_path = os.path.join(temp_dir, "upload.zip")
@@ -239,7 +307,8 @@ def execute_import_logic(
     import_queue: bool,
     db_session: Session
 ):
-    temp_dir = os.path.join(tempfile.gettempdir(), f"bilimusic_import_{session_id}")
+    # [修复] session_id 必须经 resolve_import_temp_dir() 校验，理由见该函数注释
+    temp_dir = resolve_import_temp_dir(session_id)
     if not os.path.exists(temp_dir):
         raise HTTPException(status_code=400, detail="导入会话已过期或无效")
         
@@ -254,9 +323,14 @@ def execute_import_logic(
             if c["title"] in existing_cols:
                 col_map[c["id"]] = existing_cols[c["title"]].id
             else:
-                new_col = models.Collection(id=c["id"], title=c["title"], type="local")
+                # [修复] 原实现直接复用压缩包里的 id 作为主键。c["id"] 是不可信字符串，
+                # 若该 id 恰好已被另一个**同名之外**的媒体夹占用，commit() 会抛
+                # IntegrityError：此时媒体文件可能已经拷贝进来，导入中断且临时目录被清理。
+                # 改为始终分配新主键，旧 id 仅用于 col_map 映射。
+                new_id = uuid.uuid4().hex[:8]
+                new_col = models.Collection(id=new_id, title=c["title"], type="local")
                 db_session.add(new_col)
-                col_map[c["id"]] = new_col.id
+                col_map[c["id"]] = new_id
         db_session.commit()
         
         from ..core.paths import DATA_DIR
@@ -286,10 +360,17 @@ def execute_import_logic(
             existing_v.local_mimetype = v.get("local_mimetype", None)
             
             if v.get("pic"):
-                temp_cover = os.path.join(temp_dir, "covers", v["pic"])
-                if os.path.exists(temp_cover):
-                    shutil.copy2(temp_cover, os.path.join(covers_dir, v["pic"]))
-                existing_v.pic = v["pic"]
+                # [修复] v["pic"] 来自压缩包内的 metadata.json，属于**不可信输入**。
+                # 原实现直接把它当路径分量拼接：绝对路径会让 os.path.join 丢弃
+                # covers_dir（源与目标相同还会抛 SameFileError 导致导入中断并被清理），
+                # 含 ".." 的取值还能把 covers/ 之外的文件拷进来，并把穿越字符串写进数据库。
+                # 这里只取纯文件名，任何目录成分一律丢弃。
+                pic_name = os.path.basename(str(v.get("pic") or "").replace("\\", "/"))
+                if pic_name and pic_name not in ('.', '..'):
+                    temp_cover = os.path.join(temp_dir, "covers", pic_name)
+                    if os.path.exists(temp_cover):
+                        shutil.copy2(temp_cover, os.path.join(covers_dir, pic_name))
+                    existing_v.pic = pic_name
                 
             has_media_in_zip = False
             if os.path.exists(os.path.join(temp_dir, "media")):

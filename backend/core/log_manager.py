@@ -493,6 +493,7 @@ _cleaner_stop = threading.Event()
 
 def _read_log_config():
     """从 config.yaml 读取日志配置（失败则使用默认值）。"""
+    from .utils import as_bool
     cfg = {
         'memory_capacity': DEFAULT_MEMORY_CAPACITY,
         'max_file_mb': DEFAULT_MAX_FILE_MB,
@@ -509,8 +510,8 @@ def _read_log_config():
         cfg['max_file_mb'] = float(config.get('logging.max_file_mb', DEFAULT_MAX_FILE_MB))
         cfg['max_files'] = int(config.get('logging.max_files', DEFAULT_MAX_FILES))
         cfg['max_total_mb'] = float(config.get('logging.max_total_mb', DEFAULT_MAX_TOTAL_MB))
-        cfg['console'] = bool(config.get('logging.console', True))
-        cfg['file_enabled'] = bool(config.get('logging.file_enabled', True))
+        cfg['console'] = as_bool(config.get('logging.console', True), True)
+        cfg['file_enabled'] = as_bool(config.get('logging.file_enabled', True), True)
         cfg['level'] = str(config.get('logging.level', 'DEBUG')).upper()
     except Exception:
         pass

@@ -520,14 +520,26 @@ async def upload_font_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="不支持的字体格式")
     
     from ..core.paths import DATA_DIR
-    fonts_dir = os.path.join(DATA_DIR, "fonts")
+    fonts_dir = os.path.abspath(os.path.join(DATA_DIR, "fonts"))
     os.makedirs(fonts_dir, exist_ok=True)
     
-    file_path = os.path.join(fonts_dir, file.filename)
+    # [修复] 原实现直接把客户端提供的 file.filename 拼进路径：
+    #   file_path = os.path.join(fonts_dir, file.filename)
+    # 上传文件名形如 "..\..\config.yaml"（扩展名仍可为 .ttf 之外的形式绕过，
+    # 或 "..\..\backend\data\bili_cookies.json.ttf" 覆盖凭据）即可把任意内容
+    # 写到数据目录之外，属于目录穿越 / 任意文件写入。
+    # 现改为只取纯文件名、剥掉任何目录成分，并用绝对路径前缀做二次校验兜底。
+    raw_name = os.path.basename((file.filename or '').replace('\\', '/'))
+    if not raw_name:
+        raise HTTPException(status_code=400, detail="字体文件名无效")
+    file_path = os.path.abspath(os.path.join(fonts_dir, raw_name))
+    if os.path.dirname(file_path) != fonts_dir:
+        raise HTTPException(status_code=403, detail="Illegal file path")
+
     with open(file_path, "wb") as f:
         f.write(await file.read())
     
-    return {"status": "success", "filename": file.filename, "url": f"/api/system/fonts/raw/{file.filename}"}
+    return {"status": "success", "filename": raw_name, "url": f"/api/system/fonts/raw/{raw_name}"}
 
 @router.get("/fonts/raw/{filename}")
 async def get_font_raw(filename: str):

@@ -24,7 +24,9 @@ import {
   XMarkIcon,
   ShieldExclamationIcon,
   LightBulbIcon,
-  BugAntIcon
+  BugAntIcon,
+  CheckCircleIcon,
+  XCircleIcon
 } from '@heroicons/vue/24/solid'
 
 const store = usePlayerStore()
@@ -242,7 +244,7 @@ async function handleCopy() {
                  :class="lastResult.ok
                    ? 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/20'
                    : 'bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-500/20'">
-              <span>{{ lastResult.ok ? '✓' : '✕' }}</span>
+              <component :is="lastResult.ok ? CheckCircleIcon : XCircleIcon" class="w-4 h-4 shrink-0 mt-px" />
               <span class="flex-1">{{ lastResult.message }}</span>
             </div>
 

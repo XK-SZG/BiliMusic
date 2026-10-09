@@ -107,6 +107,12 @@ def run_migrations():
     except Exception as e:
         logger.error(f"数据库迁移失败: {e}")
         conn.rollback()
+        # [修复] 原实现只记录日志并吞掉异常，导致 backend/main.py 的 lifespan 里
+        # 「迁移失败 -> get_error_manager().report_exception(scope='database')」分支
+        # 永远不会执行：用户升级后如果迁移失败，界面不会出现任何错误提示，
+        # 而旧库缺少新列会让后续请求以各种奇怪的 500 报错，极难定位。
+        # 这里回滚后重新抛出，交由调用方登记到错误系统。
+        raise
     finally:
         conn.close()
 

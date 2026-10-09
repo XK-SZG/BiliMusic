@@ -35,3 +35,15 @@ config.yaml
 # Release / 临时产物
 commit_msg.txt
 release_notes*.md
+
+# [修复] 上面的 `build/` 会连带忽略 frontend/build/，而那里放的是**打包必需资源**：
+#   - frontend/build/afterPack.cjs —— package.json 的 build.afterPack 直接引用它，
+#     缺失时 electron-builder 打包失败；它负责生成 NSIS 覆盖更新宏。
+#   - frontend/build/icon.ico      —— buildResources 目录，缺少时 electron-builder 回退默认图标。
+# 因此只放开这两个「必须入库」的资源。uninstall_list.nsh 是 afterPack.cjs 的生成物：
+# electron-builder 会先执行 afterPack 再编译 NSIS，所以它不需要入库，也不应入库
+# （避免新旧版本不一致导致升级清单过期）。
+!frontend/build/
+!frontend/build/afterPack.cjs
+!frontend/build/icon.ico
+frontend/build/uninstall_list.nsh

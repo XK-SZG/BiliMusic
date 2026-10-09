@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted, nextTick } from 'vue'
+import { DocumentTextIcon } from '@heroicons/vue/24/solid'
 
 const props = defineProps({
   show: Boolean
@@ -52,7 +53,7 @@ function onDecline() {
         <div class="px-8 py-5 border-b border-gray-100 dark:border-white/5 bg-gray-50/80 dark:bg-black/40 shrink-0 backdrop-blur-md relative z-10 flex items-center justify-between">
           <div>
             <h2 class="text-xl font-black text-gray-800 dark:text-white flex items-center gap-3 tracking-tight">
-              <span class="w-10 h-10 rounded-2xl bg-primary-100 dark:bg-primary-900/50 text-primary-600 dark:text-primary-400 flex items-center justify-center text-xl shadow-inner border border-primary-200 dark:border-primary-800/50">📄</span>
+              <span class="w-10 h-10 rounded-2xl bg-primary-100 dark:bg-primary-900/50 text-primary-600 dark:text-primary-400 flex items-center justify-center shadow-inner border border-primary-200 dark:border-primary-800/50"><DocumentTextIcon class="w-5 h-5" /></span>
               用户协议与隐私政策
             </h2>
             <p class="text-xs text-gray-500 dark:text-gray-400 mt-1.5 font-medium ml-[52px]">阅读完毕即可解锁同意按钮进入 BiliMusic</p>

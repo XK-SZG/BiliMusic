@@ -78,17 +78,69 @@ _FORBIDDEN_SQL = re.compile(
     re.IGNORECASE)
 
 #: python 动作允许访问的模块白名单（前缀匹配）
+#: [修复] 原白名单包含 subprocess 与 shutil，而二者都能执行任意系统命令 /
+#: 删除任意文件，导致「表达式执行」能力可以绕过独立的「命令执行」闸门
+#: （SHELL_WHITELIST / COMMAND_TIMEOUT / 审计标签全部失效）。详见下方
+#: PYTHON_SAFE_NAMESPACES 的说明。
 PYTHON_MODULE_ALLOWLIST = (
-    'os', 'sys', 'platform', 'json', 'time', 'datetime', 'shutil', 'subprocess',
-    'logging', 'collections', 're', 'math', 'statistics', 'psutil', 'threading',
-    'socket', 'sqlite3', 'hashlib', 'uuid', 'traceback', 'gc', 'locale',
+    'os', 'sys', 'platform', 'json', 'time', 'datetime',
+    'logging', 'collections', 're', 'math', 'statistics', 'threading',
+    'hashlib', 'uuid', 'traceback', 'gc', 'locale',
 )
 
-#: python 动作中被禁止出现的危险片段
+#: 允许暴露给表达式的「安全属性」白名单：模块名 -> 允许的下划线前缀。
+#:
+#: [修复] 根因是沙箱把**整个模块对象**注入命名空间，例如 `os` 一旦注入，
+#: `os.system(...)` 就等于任意命令执行，而黑名单只逐词匹配了 `os.system`
+#: 这一种写法。任何「黑名单 + 注入完整模块」的组合都不可能是安全的，
+#: 因此改为：只注入每个模块显式列出的**只读属性/函数**，其余一律不可达。
+#: 这样 `subprocess.*` / `os.system` / `shutil.rmtree` / `sys.modules` 等
+#: 根本不存在于表达式的可见命名空间中，无需依赖字符串黑名单。
+PYTHON_SAFE_NAMESPACES = {
+    'os': ('getcwd', 'cpu_count', 'getpid', 'name', 'sep', 'linesep', 'path'),
+    'sys': ('version', 'platform', 'executable', 'maxsize', 'byteorder',
+            'getrecursionlimit', 'getdefaultencoding'),
+    'platform': ('system', 'release', 'version', 'machine', 'processor',
+                 'python_version', 'node', 'architecture', 'platform', 'uname'),
+    'json': ('dumps', 'loads', 'dump', 'load'),
+    'time': ('time', 'time_ns', 'monotonic', 'perf_counter', 'strftime',
+             'localtime', 'gmtime', 'timezone', 'altzone', 'tzname'),
+    'datetime': ('datetime', 'date', 'time', 'timedelta', 'timezone', 'MINYEAR',
+                 'MAXYEAR'),
+    'logging': ('getLogger', 'getLevelName'),
+    'collections': ('Counter', 'OrderedDict', 'defaultdict', 'deque', 'namedtuple'),
+    're': ('match', 'search', 'findall', 'finditer', 'sub', 'split', 'compile',
+           'escape', 'IGNORECASE', 'MULTILINE', 'DOTALL', 'VERBOSE'),
+    'math': ('pi', 'e', 'tau', 'inf', 'nan', 'sqrt', 'floor', 'ceil', 'fabs',
+             'log', 'log2', 'log10', 'exp', 'pow', 'factorial', 'gcd', 'trunc',
+             'isnan', 'isinf', 'hypot', 'copysign'),
+    'statistics': ('mean', 'median', 'mode', 'stdev', 'variance', 'pstdev',
+                   'pvariance', 'quantiles', 'fmean', 'harmonic_mean'),
+    'threading': ('active_count', 'enumerate', 'current_thread', 'main_thread',
+                  'get_ident', 'TIMEOUT_MAX'),
+    'hashlib': ('md5', 'sha1', 'sha256', 'sha512', 'blake2b', 'blake2s',
+                'new', 'algorithms_available', 'algorithms_guaranteed'),
+    'uuid': ('uuid1', 'uuid4', 'uuid5', 'UUID', 'NAMESPACE_DNS'),
+    'traceback': ('format_exc', 'format_tb', 'format_stack', 'print_exc'),
+    'gc': ('get_count', 'get_threshold', 'get_objects', 'is_enabled', 'get_stats'),
+    'locale': ('getpreferredencoding', 'getdefaultlocale', 'getlocale'),
+    # psutil 为可选依赖，用空元组表示「仅暴露下列属性」，见 _PYTHON_PSUTIL_SAFE
+    'psutil': (),
+}
+
+#: psutil 可选依赖的安全属性（存在时才注入）
+PYTHON_PSUTIL_SAFE = (
+    'cpu_count', 'cpu_percent', 'virtual_memory', 'swap_memory', 'disk_usage',
+    'disk_partitions', 'boot_time', 'Process', 'NoSuchProcess', 'Error',
+)
+
+#: python 动作中被禁止出现的危险片段（第一道粗筛，真正的隔离靠命名空间）
 PYTHON_FORBIDDEN = (
     '__import__', 'importlib', 'eval(', 'exec(', 'compile(', 'open(',
-    'shutil.rmtree', 'os.remove', 'os.unlink', 'os.rmdir', 'os.system',
-    'subprocess.popen', 'socket.socket', 'urllib', 'requests', 'pickle',
+    'shutil.rmtree', 'shutil.move', 'shutil.copy', 'os.remove', 'os.unlink',
+    'os.rmdir', 'os.system', 'os.popen', 'os.exec', 'os.spawn', 'os.fork',
+    'os.kill', 'os.chmod', 'os.chown', 'os.rename', 'os.walk', 'os.listdir',
+    'subprocess', 'socket.socket', 'urllib', 'requests', 'pickle',
     'ctypes', 'builtins', 'globals(', 'locals(', 'setattr(', 'delattr(',
     '__subclasses__', '__globals__', '__builtins__', 'input(',
     'bili_cookies', 'bili_user_info', 'sessdata', 'bili_jct',
@@ -479,11 +531,12 @@ def _check_python_expression(expr):
     # 禁止属性访问链中的下划线魔术属性（阻断 __class__ / __globals__ 类逃逸）
     if re.search(r'\.\s*_', expr):
         raise DebugActionError('表达式中不允许访问下划线开头的私有属性')
-    # 只允许白名单模块被引用，其它对象名一律拒绝
-    referenced = set(re.findall(r'\b([A-Za-z_][A-Za-z0-9_]*)\s*\.', expr))
-    unknown = referenced - set(PYTHON_MODULE_ALLOWLIST) - {
-        'self', 'session', 'collections', 'statistics', 'logging',
-    }
+    # 只允许白名单模块被引用，其它对象名一律拒绝。
+    # [修复] 原正则 `\b([A-Za-z_]\w*)\s*\.` 会把**链式调用中的每个属性名**都当成
+    # 「被引用的对象」，于是 `sys.version.split()[0]` 里的 version/split 被误判为
+    # 未授权对象而拒绝。用负向后行断言只取点号链的**根对象**（紧跟在点号后的属性名跳过）。
+    referenced = set(re.findall(r'(?<![\w.])([A-Za-z_][A-Za-z0-9_]*)\s*\.', expr))
+    unknown = referenced - set(PYTHON_MODULE_ALLOWLIST)
     if unknown:
         raise DebugActionError(
             f'表达式中引用了未授权的对象: {", ".join(sorted(unknown))}；'
@@ -491,26 +544,46 @@ def _check_python_expression(expr):
     return expr
 
 
+def _build_python_sandbox_namespace():
+    """构造表达式可见的受限命名空间。
+
+    只注入 PYTHON_SAFE_NAMESPACES 里显式列出的属性，**不注入模块对象本身**。
+    例如 `os` 只暴露 `os.getcwd` / `os.sep` 这类只读项，
+    `os.system`、`os.popen`、`os.remove` 在命名空间里根本不存在。
+    """
+    import types
+
+    ns = {}
+    for module_name, safe_names in PYTHON_SAFE_NAMESPACES.items():
+        if module_name == 'psutil':
+            try:
+                import psutil  # 可选依赖
+            except Exception:
+                continue
+            safe_names = PYTHON_PSUTIL_SAFE
+            module_obj = psutil
+        else:
+            try:
+                module_obj = __import__(module_name)
+            except Exception:
+                continue
+
+        # 用 SimpleNamespace 承载只读属性，避免把真实模块对象交出去
+        proxy = types.SimpleNamespace()
+        for attr in safe_names:
+            try:
+                setattr(proxy, attr, getattr(module_obj, attr))
+            except Exception:
+                continue
+        ns[module_name] = proxy
+    return ns
+
+
 def run_python_expression(expr):
     """在一个受限命名空间中执行 Python 表达式。"""
     _check_python_expression(expr)
-    import math
-    import statistics
-    import collections
-    import hashlib
 
-    allowed_modules = {
-        'os': os, 'sys': sys, 'platform': platform, 'json': json,
-        'time': time, 'datetime': datetime, 'shutil': shutil,
-        'logging': logging, 'collections': collections, 're': re,
-        'math': math, 'statistics': statistics, 'hashlib': hashlib,
-        'threading': threading, 'uuid': uuid, 'subprocess': subprocess,
-    }
-    try:
-        import psutil  # 可选依赖
-        allowed_modules['psutil'] = psutil
-    except Exception:
-        pass
+    allowed_modules = _build_python_sandbox_namespace()
 
     sandbox = {'__builtins__': {
         'len': len, 'str': str, 'int': int, 'float': float, 'bool': bool,
@@ -522,7 +595,7 @@ def run_python_expression(expr):
     }}
     sandbox.update(allowed_modules)
     try:
-        result = eval(expr, sandbox, {})  # noqa: S307 - 已通过白名单与黑名单双重校验
+        result = eval(expr, sandbox, {})  # noqa: S307 - 已通过命名空间隔离与关键词双重校验
     except Exception as e:
         raise DebugActionError(f'表达式执行失败: {type(e).__name__}: {e}')
     try:

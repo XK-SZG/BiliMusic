@@ -69,7 +69,7 @@ async function startPythonBackend() {
   const logPath = path.join(app.getPath('userData'), 'backend.log')
   const startMsg = `\n${'='.repeat(60)}\n启动时间: ${new Date().toISOString()}\n后端路径: ${scriptPath}\n监听端口: ${port}\n开发模式: ${isDev}\n${'='.repeat(60)}\n`
   fs.appendFileSync(logPath, startMsg)
-  console.log(`📝 后端日志文件: ${logPath}`)
+  console.log(`[后端日志] 日志文件: ${logPath}`)
 
   pythonProcess.stdout.on('data', (data) => {
     const msg = `[STDOUT] ${data}`
@@ -96,7 +96,7 @@ async function startPythonBackend() {
     fs.appendFileSync(logPath, msg + '\n')
   })
   
-  console.log(`✅ 后端进程已启动 (PID: ${pythonProcess.pid})`)
+  console.log(`[后端进程] 已启动 (PID: ${pythonProcess.pid})`)
 }
 
 function createWindow() {

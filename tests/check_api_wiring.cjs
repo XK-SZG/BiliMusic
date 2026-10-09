@@ -76,7 +76,7 @@ for (const file of walk(SRC)) {
       checked++
       if (!methods.has(method)) {
         const line = text.slice(0, cm.index).split('\n').length
-        console.log(`  ✗ ${path.relative(root, file)}:${line}  调用 ${alias}.${method}()，但 ${mod} 未导出该方法`)
+        console.log(`  [FAIL] ${path.relative(root, file)}:${line}  调用 ${alias}.${method}()，但 ${mod} 未导出该方法`)
         problems++
       }
     }
@@ -155,7 +155,7 @@ if (!fs.existsSync(debugRouter) || !fs.existsSync(systemApiFile)) {
 
     const hasToken = /debugHeaders\(/.test(block.body) || /X-Debug-Token/.test(block.body)
     if (!hasToken) {
-      console.log(`  ✗ api/system.js 的 ${block.name}() 调用受保护的 `
+      console.log(`  [FAIL] api/system.js 的 ${block.name}() 调用受保护的 `
         + `${route.method} ${fullPath}，但未携带 X-Debug-Token`)
       missingToken++
       problems++
@@ -171,7 +171,7 @@ if (!fs.existsSync(debugRouter) || !fs.existsSync(systemApiFile)) {
         const firstArg = args.split(',')[0].trim()
         if (!firstArg || /^\d+$/.test(firstArg) || /^['"]/.test(firstArg)) {
           const line = text.slice(0, cm.index).split('\n').length
-          console.log(`  ✗ ${path.relative(root, file)}:${line}  `
+          console.log(`  [FAIL] ${path.relative(root, file)}:${line}  `
             + `${block.name}() 首个参数不是调试令牌（实际：${firstArg || '空'}）`)
           problems++
         }

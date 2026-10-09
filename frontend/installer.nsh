@@ -43,7 +43,11 @@
         ; 如果 $1 == "1"，说明旧版是安全的，我们什么都不做，让 electron-builder 正常调用旧版卸载程序即可。
     ${EndIf}
 
-    MessageBox MB_OK|MB_ICONINFORMATION "提示：BiliMusic 会在安装目录下缓存大量的音视频资源。为了避免占用系统盘空间，建议您将软件安装在非 C 盘（默认已为您选择 D:\BiliMusic）。"
+    ; [修复] 该提示框原先无条件弹出，静默安装（Setup.exe /S、包管理器、
+    ; 脚本化无人值守升级）会永久卡在这个模态对话框上。静默模式下必须跳过。
+    ${IfNot} ${Silent}
+        MessageBox MB_OK|MB_ICONINFORMATION "提示：BiliMusic 会在安装目录下缓存大量的音视频资源。为了避免占用系统盘空间，建议您将软件安装在非 C 盘（默认已为您选择 D:\BiliMusic）。"
+    ${EndIf}
 !macroend
 
 !macro customInstall

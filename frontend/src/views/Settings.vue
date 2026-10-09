@@ -45,6 +45,7 @@ import {
   CloudArrowDownIcon,
   CircleStackIcon,
   CheckCircleIcon,
+  XCircleIcon,
   ExclamationTriangleIcon,
   PowerIcon,
   InformationCircleIcon,
@@ -109,7 +110,7 @@ const logFilter = reactive({
 
 // 心跳类别：可分别屏蔽「请求 / 登录验证 / 前端轮询」
 const LOG_HEARTBEAT_CATEGORIES = [
-  { id: 'request', label: 'HTTP 请求', desc: '📡 [请求]、urllib3 等逐条 HTTP 访问日志' },
+  { id: 'request', label: 'HTTP 请求', desc: '[请求]、urllib3 等逐条 HTTP 访问日志' },
   { id: 'login', label: '登录验证', desc: 'B 站导航接口验证、登录验证成功、API 缓存清除' },
   { id: 'polling', label: '前端轮询', desc: '/download/status、/system/events 等高频轮询' }
 ]
@@ -2605,7 +2606,7 @@ async function executeFactoryReset() {
              :class="logStatus.lastError
                ? 'bg-red-50 dark:bg-red-500/10 border-red-200 dark:border-red-500/20 text-red-600 dark:text-red-400'
                : 'bg-emerald-50/70 dark:bg-emerald-500/5 border-emerald-100 dark:border-emerald-500/10 text-emerald-700 dark:text-emerald-400'">
-          <span>{{ logStatus.lastError ? '✕' : '✓' }}</span>
+          <component :is="logStatus.lastError ? XCircleIcon : CheckCircleIcon" class="w-4 h-4 shrink-0" />
           <span>{{ logStatus.lastAction || '就绪' }}</span>
           <span v-if="logStatus.lastError" class="font-mono break-all">{{ logStatus.lastError }}</span>
           <span class="ml-auto text-gray-400 font-mono">{{ logStatus.lastTime }}</span>

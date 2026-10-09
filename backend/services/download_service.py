@@ -303,7 +303,10 @@ class Downloader:
         config = get_config()
         self.max_workers = int(config.get('download.max_workers', 3) or 3)
         self.max_retries = int(config.get('download.max_retries', 3) or 3)
-        self.keep_failed_files = bool(config.get('download.keep_failed_files', True))
+        # [修复] bool("false") 为 True：若 config.yaml 里把 keep_failed_files 写成字符串
+        # "false"/"0"，原来的 bool(...) 会得到 True，用户以为丢弃的失败残留仍会被保留。
+        from ..core.utils import as_bool
+        self.keep_failed_files = as_bool(config.get('download.keep_failed_files', True), True)
         logging.info(f"[下载服务] 初始化 {self.max_workers} 个下载工作线程（最大重试 {self.max_retries} 次）")
         for i in range(self.max_workers):
             worker_thread = threading.Thread(target=self._worker, name=f"DownloadWorker-{i}", daemon=True)
@@ -618,13 +621,18 @@ class Downloader:
                 file_size = os.path.getsize(file_path)
                 from ..database import models
                 with get_thread_safe_db_session() as db:
-                    today = datetime.utcnow().strftime('%Y-%m-%d')
+                    # [修复] 统一按本地时间归属日期：stats.py 的 record_play / record_app_usage /
+                    # record_network_traffic 三个接口都用 datetime.now() 计算 today，
+                    # 而此处原先用 utcnow()。在 UTC+8 等时区，凌晨 0:00-8:00 下载产生的流量
+                    # 会被写到「前一天」的行上，导致日统计与排行榜前后不一致。
+                    today = datetime.now().strftime('%Y-%m-%d')
                     stat = db.query(models.DailyStat).filter(models.DailyStat.date == today).first()
                     if not stat:
                         stat = models.DailyStat(date=today)
                         db.add(stat)
-                    stat.network_traffic += file_size
-                    stat.uncached_traffic += file_size # 下载肯定是未缓存的流量
+                    # [修复] 历史行可能因补列而为 NULL，直接 += 会抛 TypeError
+                    stat.network_traffic = (stat.network_traffic or 0) + file_size
+                    stat.uncached_traffic = (stat.uncached_traffic or 0) + file_size # 下载肯定是未缓存的流量
                     db.commit()
             except Exception as e:
                 logging.error(f"记录下载流量失败: {e}")
@@ -807,13 +815,22 @@ class Downloader:
             if cookie_file:
                 ydl_opts['cookiefile'] = cookie_file.name
 
+            # [修复] 分集视频必须把集号写进 URL 的 ?p= 查询串。
+            # 原实现只设置 ydl_opts['playlist_items']，但 yt-dlp 的 B 站解析器是从
+            # **URL 查询串**读取 part_id 的；且本函数上面已设 noplaylist=True，
+            # 解析器不会把选集展开成播放列表，playlist_items 因此始终不生效 ——
+            # 结果是下载 BVxxx_p3 时把 P1 的流写进了 BVxxx_p3.mp4，
+            # 校验还会通过并被标记为「已完成」，用户永久拿到错误的剧集且不会重下。
+            download_url = f"https://www.bilibili.com/video/{real_bvid}"
             if is_part:
-                ydl_opts['playlist_items'] = str(p_num)
+                download_url += f"?p={p_num}"
+                # playlist_items 对 noplaylist 场景无效，移除以免误导
+                ydl_opts.pop('playlist_items', None)
 
             # [修复 Errno 22] 下载全程隔离标准流的写入异常
             with guarded_standard_streams():
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([f"https://www.bilibili.com/video/{real_bvid}"])
+                    ydl.download([download_url])
 
             # [修复] ignoreerrors=True 时 yt-dlp 会「打印错误后正常返回」，
             # 若不在这里检查，下载会被误判为成功，随后才在校验阶段暴露，

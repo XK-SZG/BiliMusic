@@ -9,7 +9,7 @@ from threading import Thread
 from fastapi import FastAPI, Request, HTTPException
 
 # ============================================================
-# 🔴 DIAGNOSTIC PROBE — direct file write, bypasses logging entirely
+# DIAGNOSTIC PROBE — direct file write, bypasses logging entirely
 # ============================================================
 _DIAG_LOG = os.environ.get('BILIMUSIC_CRASH_LOG', '')
 
@@ -124,36 +124,44 @@ async def lifespan(app: FastAPI):
     # 2. 启动时校验已下载文件的完整性
     def verify_completed_downloads():
         with get_thread_safe_db_session() as db_session:
-            # 使用分页查询避免一次性加载过多数据导致内存溢出
+            # [修复] 原实现用 LIMIT/OFFSET 分页遍历「download_status == 'completed'」的结果集，
+            # 但循环体本身会把校验失败的记录改写成 'not_downloaded'，结果集在翻页过程中不断变短：
+            # 已改写的行退出结果集后，其后面的行会整体前移，offset 再递增就会整段跳过，
+            # 表现为「部分已丢失的文件永远不会被重置」，界面长期显示已下载却播放无声。
+            # 现改为按主键推进的游标分页：过滤条件（bvid > 游标）不随状态改写而变化，逐行且不遗漏。
             page_size = 100
-            offset = 0
+            last_bvid = ''
             fixed_count = 0
             reset_count = 0
-            
+
             # 获取总数用于日志
             total_count = db_session.query(models.Video).filter(
                 models.Video.download_status == 'completed'
             ).count()
-            
+
             if total_count == 0:
                 logger.info("[启动校验] 无需校验的下载文件")
                 return
-                
+
             logger.info(f"[启动校验] 开始校验 {total_count} 个已下载文件...")
-            
+
             while True:
                 videos = db_session.query(models.Video).filter(
-                    models.Video.download_status == 'completed'
-                ).offset(offset).limit(page_size).all()
-                
+                    models.Video.download_status == 'completed',
+                    models.Video.bvid > last_bvid
+                ).order_by(models.Video.bvid.asc()).limit(page_size).all()
+
                 if not videos:
                     break
-                    
+
+                # 游标推进：始终大于本批最后一条的主键
+                last_bvid = videos[-1].bvid
+
                 for video in videos:
                     # 检查 local_path 是否存在
                     if video.local_path and os.path.exists(video.local_path):
                         continue
-                        
+
                     # 如果 local_path 不存在，尝试在默认下载目录查找
                     expected_path = os.path.join(cleanup_service.DOWNLOAD_PATH, f"{video.bvid}.mp4")
                     if os.path.exists(expected_path):
@@ -164,11 +172,10 @@ async def lifespan(app: FastAPI):
                         video.download_status = 'not_downloaded'
                         video.local_path = None
                         reset_count += 1
-                
+
                 # 每批次提交一次，避免长事务
                 db_session.commit()
-                offset += page_size
-                
+
             logger.info(f"[启动校验] 完成，修复了 {fixed_count} 个 local_path，重置了 {reset_count} 个无效状态")
 
     # 在后台线程执行校验，不阻塞启动
@@ -202,6 +209,16 @@ async def lifespan(app: FastAPI):
     
     # 关闭时执行
     logger.info("正在关闭应用...")
+    # [修复] 原实现用已废弃的 @app.on_event("shutdown") 关闭封面缓存服务，
+    # FastAPI 新版本会发出 DeprecationWarning 且存在被移除的风险，
+    # 一旦不再触发，httpx.AsyncClient 会带着未关闭的连接池退出。
+    # 现统一收敛到 lifespan 的收尾段（与应用启动对称）。
+    try:
+        from .services.cover_cache_service import get_cover_cache_service
+        await get_cover_cache_service().close()
+        logger.info("封面缓存服务已关闭")
+    except Exception as e:
+        logger.warning(f"关闭封面缓存服务失败（忽略）: {e}")
     logger.info(">>> 应用已关闭")
 
 app = FastAPI(title="BiliMusic API", lifespan=lifespan)
@@ -301,14 +318,6 @@ async def proxy_image(url: str):
         logger.error(f"代理图片失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """应用关闭时清理资源"""
-    from .services.cover_cache_service import get_cover_cache_service
-    cover_service = get_cover_cache_service()
-    await cover_service.close()
-    logger.info("封面缓存服务已关闭")
-
 # 日志中间件
 #
 # 说明：这里排除的路径都是「高频轮询」或「会自身产生日志查询」的接口。
@@ -332,12 +341,12 @@ _NOISY_PATH_SUFFIXES = (
 async def log_requests(request: Request, call_next):
     # 忽略高频轮询与日志查询请求，并将其余请求降级为 DEBUG
     if not request.url.path.endswith(_NOISY_PATH_SUFFIXES):
-        logger.debug(f"📡 [请求] {request.method} {request.url}")
+        logger.debug(f"[请求] {request.method} {request.url}")
     try:
         response = await call_next(request)
         return response
     except Exception as e:
-        logger.error(f"❌ [错误] {e}")
+        logger.error(f"[错误] {e}")
         # [新增] 未处理的 HTTP 层异常统一进入错误系统
         try:
             from .core.error_manager import get_error_manager
@@ -348,7 +357,9 @@ async def log_requests(request: Request, call_next):
                 dedupe_key=f'api:{request.url.path}', popup=False)
         except Exception:
             pass
-        raise e
+        # [修复] 原写法 `raise e` 会重置异常链，丢失原始 traceback（只剩重新抛出的位置），
+        # 排障时看不到真正的出错点。裸 raise 才能保留完整栈。
+        raise
 
 if __name__ == "__main__":
     import uvicorn
