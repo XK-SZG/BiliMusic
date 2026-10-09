@@ -1,8 +1,26 @@
 import axios from 'axios'
 
-const isDev = window.location.port === '5173' || window.location.port === '3000'
-const isElectron = window.location.protocol === 'file:'
-const API_BASE = import.meta.env.VITE_API_URL || (isDev || isElectron ? 'http://127.0.0.1:12180/api' : `${window.location.origin}/api`)
+// API 基址解析
+//
+// 1. 优先使用 VITE_API_URL（显式指定时）。
+// 2. 开发服务器（vite dev）下走**同源相对路径** /api —— vite.config.js 已把
+//    /api 代理到后端，因此不再依赖「当前端口是不是 3000 / 5173」这种脆弱判断，
+//    用 localhost、127.0.0.1 还是别的端口都能正常访问。
+// 3. Electron 打包环境（file:// 协议）没有同源后端，直接指向本机后端。
+// 4. 其它情况（例如由后端自身托管前端产物）使用当前 origin。
+function resolveApiBase() {
+  if (import.meta.env.VITE_API_URL) return import.meta.env.VITE_API_URL
+  const { protocol, port, hostname, origin } = window.location
+  const isHttp = protocol === 'http:' || protocol === 'https:'
+  const isLocalHost = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
+  // 开发服务器：本地 http 且端口不是后端端口
+  if (isHttp && isLocalHost && port && port !== '12180') return '/api'
+  // Electron 打包环境
+  if (protocol === 'file:') return 'http://127.0.0.1:12180/api'
+  return `${origin}/api`
+}
+
+export const API_BASE = resolveApiBase()
 
 const service = axios.create({
   baseURL: API_BASE,

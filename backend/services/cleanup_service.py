@@ -39,9 +39,30 @@ def run_cleanup_scheduler():
         time.sleep(CLEANUP_INTERVAL_SECONDS)
 
 
+def clean_caches():
+    """[新增] 立即执行一次完整清理，供错误系统「一键修复（存储空间不足）」调用。
+
+    返回 (清理的孤立文件数, 释放前的缓存字节数)，异常时由调用方捕获。
+    """
+    orphan_removed = _clean_orphan_files()
+    before_bytes = 0
+    with get_thread_safe_db_session() as db:
+        for (local_path,) in db.query(Video.local_path).filter(
+                Video.download_status == 'completed').all():
+            if local_path and os.path.exists(local_path):
+                try:
+                    before_bytes += os.path.getsize(local_path)
+                except Exception:
+                    pass
+    _enforce_cache_limit()
+    logging.info(f"[清理服务] 手动清理完成：孤立文件 {orphan_removed} 个，清理前缓存 {before_bytes} 字节")
+    return orphan_removed, before_bytes
+
+
 def _clean_orphan_files():
     """清理数据库中已不存在记录的物理文件"""
     logging.info("开始扫描孤立缓存文件...")
+    removed = 0
     with get_thread_safe_db_session() as db:
         all_videos_in_db = {v.bvid for v in db.query(Video.bvid).all()}
 
@@ -55,9 +76,11 @@ def _clean_orphan_files():
                     file_path = os.path.join(DOWNLOAD_PATH, filename)
                     try:
                         os.remove(file_path)
+                        removed += 1
                         logging.info(f"清理孤立文件: {filename}")
                     except Exception as e:
                         logging.warning(f"清理孤立文件失败 {filename}: {e}")
+    return removed
 
 
 def _enforce_cache_limit():

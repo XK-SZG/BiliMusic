@@ -5,7 +5,7 @@
   <img src="frontend/public/icon.png" width="120" alt="BiliMusic Logo">
   <h1>BiliMusic</h1>
 
-![Version](https://img.shields.io/badge/version-1.0.19-blue)
+![Version](https://img.shields.io/badge/version-1.0.22-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![Vue](https://img.shields.io/badge/Vue-3.4-42b883)

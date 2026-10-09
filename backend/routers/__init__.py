@@ -6,6 +6,8 @@ from .system import router as system_router
 from .theme import router as theme_router
 from .download import router as download_router
 from .stats import router as stats_router
+from .logs import router as logs_router
+from .debug import router as debug_router
 
 __all__ = [
     "auth_router",
@@ -16,4 +18,6 @@ __all__ = [
     "theme_router",
     "download_router",
     "stats_router",
+    "logs_router",
+    "debug_router",
 ]

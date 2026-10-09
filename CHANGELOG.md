@@ -2,6 +2,196 @@
 
 所有对本项目的显著更改都将记录在此文件中。
 
+## [1.0.22] - 2026-10-08
+
+### 🐛 缺陷修复 (Bug Fixes)
+
+#### 刷新调试审计日志报 403「令牌校验失败」
+
+- **问题描述**：在前端点击审计日志的「刷新」，接口返回
+  `403 Forbidden`，后端日志记录 `[调试审计] auth_failed | 令牌校验失败`。
+- **根本原因**：后端 `/api/debug/audit`（GET/DELETE）受 `require_debug_token` 保护，
+  但前端 `api/system.js` 的 `getDebugAudit` / `clearDebugAudit` 未携带
+  `X-Debug-Token` 请求头，且调用处传入的 `100` 被当成了第一个参数
+  （原本该参数是令牌，之后才是 `limit`）。
+- **修复方案**：
+  - `getDebugAudit(token, limit)` / `clearDebugAudit(token)` / `getDebugHelp(token)`
+    统一通过 `debugHeaders(token)` 携带令牌；
+  - `Settings.vue` 的审计页签将令牌一并传入，并在**没有令牌时直接给出提示**而不发请求；
+  - 审计日志页签新增错误态：读取失败时显示具体原因（如令牌失效），
+    且当后端返回 403 时自动重新拉取调试状态，避免界面显示「已开启」但实际不可用；
+  - 表达式控制台在 403 时同样提示「令牌无效，可轮换令牌」或「调试模式已关闭」。
+- **配套加固**：[`tests/check_api_wiring.cjs`](tests/check_api_wiring.cjs) 新增「检查 B」，
+  自动比对「受 `require_debug_token` 保护的后端路由」与「前端调用是否携带令牌」，
+  可静态拦截此类缺陷；[`tests/check_api_wiring_selftest.cjs`](tests/check_api_wiring_selftest.cjs)
+  用于验证该检查确实有效（负向自检）。
+
+#### 日志与调试面板全部报 `xxx is not a function`
+
+- **问题描述**：日志面板与调试面板的每个按钮都报错，例如
+  `systemApi.getStats is not a function`、`systemApi.getLogs is not a function`、
+  `systemApi.openLogDir is not a function`、`systemApi.getDebugAgreement is not a function`。
+- **根本原因**：v1.0.21 把日志与调试接口的实现写进了新建的 `frontend/src/api/logs.js`，
+  但 `Settings.vue` 仍在 `api/system.js` 导出的 `systemApi` 上调用这些方法。
+  Vite 构建可以通过（对象上缺少方法不是编译错误），只在运行时才以 `TypeError` 暴露。
+- **修复方案**：
+  - 日志接口统一由 `logsApi`（`api/logs.js`）提供，`Settings.vue` 显式导入并改用它；
+  - 错误系统与调试接口归入 `systemApi`（`api/system.js`），
+    与 `ErrorDialog.vue`、`player.js` 的既有调用保持一致；
+  - 新增静态校验脚本 [`tests/check_api_wiring.cjs`](tests/check_api_wiring.cjs)：
+    扫描前端源码，核对每一处 `xxxApi.方法()` 是否真实导出，防止该类问题复发
+    （当前校验 86 处调用，0 处不匹配）。
+
+#### 开发环境访问地址与端口判定脆弱
+
+- **问题描述**：前端的 API 基址依赖「当前端口是不是 3000 / 5173」来判定是否处于开发模式。
+  使用 `localhost` 与 `127.0.0.1`、或通过其它端口访问时，判定会失效并向错误地址发请求；
+  `run_frontend.bat` 提示的 `5173` 端口也与 `vite.config.js` 固定的 `3000` 不一致。
+- **修复方案**：
+  - `vite.config.js` 新增 `/api`、`/local_covers`、`/local_stickers`、
+    `/local_backgrounds`、`/downloads` 代理到后端 `127.0.0.1:12180`；
+  - 开发环境改为走**同源相对路径** `/api`，不再依赖端口号判断，任何本地端口访问都可用；
+  - API 基址推导统一收敛到 `api/request.js` 的 `API_BASE`，
+    `api/system.js`、`api/logs.js`、`stores/modules/player.js` 复用同一个人实现
+    （原先同一段表达式在三处重复，容易改漏）；
+  - `run_frontend.bat` 的提示文案改为与 `vite.config.js` 一致，并说明代理行为。
+
+#### 日志面板六个操作「点了没反应」
+
+- **问题描述**：清屏、打开日志目录、日志筛选、下载日志、删除全部日志文件、
+  拉取调试协议六个操作完全没有反应，且前后端都看不到相关日志。
+- **排查结论**：后端接口实测全部正常（HTTP 200），唯一真实故障是
+  `/api/logs/open-dir` 返回 500 —— 后端在「隐藏窗口方式启动」的场景下，
+  `os.startfile()` 会抛出 `PermissionError: [WinError 5] 拒绝访问`。
+  其余五项属于**静默失败**（catch 里只弹一句无信息量的 toast），
+  叠加运行中的后端进程仍是旧版本，于是表现为「全都没反应」。
+- **修复方案**：
+  - `open_log_dir()` 改为**四重回退**：`ShellExecuteW` → `os.startfile` →
+    `explorer.exe` → `explorer.exe /select,`，并汇总每一次失败原因；
+  - 前端新增 **Electron IPC 兜底**（`ipcMain.handle('open-directory')` +
+    `shell.openPath`），主进程代劳比后端更稳妥；全部失败时自动把目录路径
+    复制到剪贴板并明确提示；
+  - 所有日志相关操作改为**显式报错**：统一提取后端 `detail`，
+    在日志面板新增「操作状态栏」，成功/失败与失败原因一目了然，
+    同时输出到控制台便于开发者排查；
+  - 修复日志中间件「自我污染」：`/api/logs/list`、`/api/logs/export` 等查询接口
+    不再记录自身的请求 URL（否则被查询的关键字会出现在它自己的日志里，
+    看起来就像筛选未生效）；`httpx` / `httpcore` 的逐请求 INFO 日志降级为 DEBUG；
+  - 修复日志级别筛选的交互歧义：默认「全部勾选」时点击级别没有任何视觉变化，
+    容易被误判为筛选失效。现在改为「点单个级别 = 只看这一级，再点 = 恢复全部」，
+    并新增「全部」按钮。
+
+#### 调试协议拉取失败时内容区空白
+
+- **修复方案**：协议弹窗新增错误态与「重新拉取协议」按钮；
+  每次打开弹窗都重新拉取，避免使用过期内容；协议内容为空时给出明确提示。
+
+### ✨ 功能优化 (Enhancements)
+
+- **心跳日志分类屏蔽**：心跳噪声细分为「HTTP 请求」「登录验证」「前端轮询」三类，
+  可分别开关。其中「登录验证」专门用于屏蔽 `auth/status` 轮询、
+  「正在请求 B 站导航接口验证登录状态」、「B 站登录验证成功」、
+  「已清除 B 站 API 缓存」等登录校验噪声；`urllib3` / `httpx` 的连接日志归入「HTTP 请求」。
+
+### 🐛 致命缺陷修复 (Critical Bug Fix)
+
+#### 下载媒体偶发 `[Errno 22] Invalid argument` 且永久无法恢复
+
+- **问题描述**：下载媒体时偶发失败，进度不到 100% 就退出，媒体被标注为「重试下载」。
+  一旦某个媒体出现该现象，无论重试多少次、甚至彻底删除后手动重试，该媒体都会**永久失败**。
+- **根本原因**（两个缺陷叠加）：
+  1. yt-dlp 在向标准错误流输出下载进度条时命中了一个不可写的控制台句柄
+     （后端由 Electron 以隐藏窗口方式启动），抛出 `OSError: [Errno 22] Invalid argument`，
+     调用栈落在 `yt_dlp/minicurses.py` → `yt_dlp/utils/_utils.py: write_string`；
+     该异常被包装成 `UnavailableVideoError`，被下载流程误判为下载失败。
+  2. 「重试」入口不会重置 `download_retry_count`。一旦累计失败达到上限，
+     此后每次重试都会在**第一次失败后立刻**被判为「失败次数过多，放弃」，
+     于是表现为「该媒体永远下载不了」。
+- **修复方案**：
+  - 从源头禁用 yt-dlp 的终端渲染（`noprogress` / `noconsoletitle` / 静默 logger），
+    进度数据仍通过 `progress_hooks` 正常回调，界面进度条不受影响。
+  - 新增标准流守卫：下载期间把 `sys.stdout` / `sys.stderr` 替换为永不抛错的守卫流，
+    即使有残留写入也只会被丢弃，绝不中断下载。
+  - 后端启动时自检标准流健康度；下载中一旦识别到该类异常，立即切换到安全输出模式
+    并**自动重新排队**，不消耗用户的重试次数。
+  - 新增 `POST /api/download/retry/{bvid}`，手动重试会清零重试计数并清理失败残留；
+    同时调整重试阈值判断，手动重试后不会「一次失败即放弃」。
+  - 失败残留文件移动到 `data/failed_downloads/` 隔离区，不再污染下一次重试，
+    也不会再被误判为「下载成功」。
+  - 文件完整性校验新增容器头检查（MP4/FLV/MKV/TS），不再只看体积。
+  - 修复 `ignoreerrors=True` 导致 yt-dlp「只打印错误不抛异常、真实原因丢失」的问题。
+
+### ✨ 新功能 (New Features)
+
+#### 全新日志系统
+
+- **时间戳同步**：所有日志统一使用本机本地时间（带时区偏移），
+  修复了旧版本内存日志把 epoch 数值当作毫秒渲染、界面显示「1970 年」的问题。
+- **实时日志**：新增 `GET /api/logs/stream`（SSE），日志产生后立即推送，
+  界面不再需要手动刷新。
+- **多条件叠加筛选**：级别、包含关键字（支持 `|` 多词）、屏蔽关键字、模块名、
+  时间区间、一键屏蔽心跳日志，所有条件可任意组合。
+- **一键复制与下载**：支持复制筛选结果、导出 TXT / JSON / JSONL。
+- **物理日志管理**：日志同时落盘（`data/logs/`），支持「一键打开日志目录」、
+  可配置「文件数量上限 / 单文件体积上限 / 总占用上限」并立即生效，
+  支持一键删除全部日志文件。
+
+#### 全新错误系统
+
+- **结构化错误目录**：为 11 类会导致业务逻辑终止的错误登记了
+  「这是什么 / 可能由什么引起 / 可能可以怎么解决」。
+- **错误弹窗**：通过 SSE 实时推送到前端，提供「一键修复」「绕过并继续」
+  「下载诊断包」「下次不再弹窗」「一键复制技术内容」。
+- **一键修复动作**：Errno 22（切换安全输出模式并重置重试）、文件不完整（清理残留）、
+  文件读写异常（重建目录）、重试耗尽（清零计数）、存储不足（立即清理缓存）、
+  数据库异常（完整性校验 + WAL 检查点）等。
+- **诊断包（ZIP）**：包含问题概要、环境快照、错误详情、最近日志与结构化日志；
+  打包前统一脱敏，**不包含** Cookie / SESSDATA / 账号信息 / 媒体库内容 / 播放记录，
+  也不存在任何自动上传行为。
+
+#### 全新调试系统（面向开发者与 Vibe Coding）
+
+- **三道闸门**：必须逐项确认《调试模式使用协议 / 风险说明书 / 责任划分书》
+  （确认记录含版本号持久化）→ 显式开关 → 令牌鉴权 + 能力开关。
+- **远程调试 API**（`/api/debug`）：连通性探测、运行场景快照、日志读取、
+  错误查询 / 修复 / 绕过、受限 Python 表达式、白名单只读命令、只读 SQL 查询、
+  自描述文档（便于 AI 助手自动发现能力）。
+- **安全设计**：仅监听 `127.0.0.1`；令牌为 32 字节随机串并使用
+  `hmac.compare_digest` 比对；支持一键轮换令牌；关闭时立即销毁；
+  调试模式不会在重启后自动恢复。
+- **审计日志**：每一次调试请求都会被记录（含耗时与结果），可在界面查看与清空。
+
+### 🔧 技术改进 (Improvements)
+
+- 新增 `backend/core/error_manager.py`：错误分类、错误目录、环境快照、诊断包生成。
+- 新增 `backend/core/debug_service.py`：调试会话、协议闸门、受限执行沙箱。
+- 新增 `backend/routers/logs.py`、`backend/routers/debug.py`。
+- 重写 `backend/core/log_manager.py`：内存环形缓冲 + 物理文件轮转 + 三级回收策略。
+- 下载流程新增磁盘空间前置检查、yt-dlp 错误信息捕获、失败残留隔离区。
+- 全局未捕获异常（主线程与子线程）统一写入日志。
+
+### 🐛 缺陷修复 (Bug Fixes)
+
+#### 设置界面脚本块被多余标签截断（构建失败 + 调试面板不可用）
+
+- **问题描述**：`frontend/src/views/Settings.vue` 中存在一个多余的 `</script>` 结束标签，
+  导致该组件的脚本块在第 595 行被提前截断，其后约 680 行脚本（包含生命周期钩子与
+  调试面板逻辑）被解析为模板外的纯文本，Vite 构建报 `Invalid end tag` 并失败。
+- **修复方案**：移除多余的 `</script>`，使脚本块恢复为单一完整块；
+  同时把模板中两个 `<br>` 改为自闭合写法 `<br />`。
+
+### 📚 文档更新 (Docs)
+
+- 新增 [`docs/日志与错误系统说明.md`](docs/日志与错误系统说明.md)：
+  实时日志、筛选、物理日志管理、错误弹窗、诊断包与 Errno 22 问题的完整说明。
+- 新增 [`docs/调试系统说明书.md`](docs/调试系统说明书.md)：
+  协议闸门、接口清单、受限动作白名单、安全边界与责任划分。
+- 更新 [`docs/配置说明.md`](docs/配置说明.md)：补充 `download.keep_failed_files`
+  与整个 `logging` 配置段。
+- 更新 `config.yaml.example`：同步新增配置项。
+
+---
+
 ## [1.0.20] - 2026-05-08
 
 ### 🐛 致命缺陷修复 (Critical Bug Fix)

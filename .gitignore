@@ -31,3 +31,7 @@ Thumbs.db
 backend/data/
 *.log
 config.yaml
+
+# Release / 临时产物
+commit_msg.txt
+release_notes*.md

@@ -27,11 +27,22 @@ def _diag(msg):
 _diag("Entering backend/main.py module-level code")
 
 # 初始化日志（必须在任何可能失败的导入之前）
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# [修复] 统一使用 core.log_manager 装配日志：
+#   1. 时间戳与系统时间严格同步（带时区偏移），不再出现「从 1970 开始计时」；
+#   2. 同时写入内存环形缓冲与物理文件，支持实时推送与历史回溯；
+#   3. 物理文件按「单文件体积 / 文件数量 / 总占用」三级策略自动轮转回收。
+try:
+    from .core.log_manager import setup_logging as _setup_logging
+    _diag("log_manager imported (early), calling setup_logging...")
+    _setup_logging()
+    _diag("setup_logging complete")
+except Exception as _log_err:  # 日志系统装配失败不能阻断启动
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.getLogger(__name__).warning(f"统一日志系统装配失败，已回退到 basicConfig: {_log_err}")
 logger = logging.getLogger(__name__)
-_diag("logging.basicConfig() done")
+_diag("logging setup done")
 
-# 尝试加载内存日志处理器（非关键功能，失败不影响启动）
+# 加载内存日志处理器（兼容旧调用路径，失败不影响启动）
 try:
     _diag("Importing log_manager...")
     from .core.log_manager import setup_memory_logger
@@ -60,7 +71,7 @@ from .database import models, db
 _diag(".database imported")
 
 _diag("Importing .routers ...")
-from .routers import auth, bili, local, play, system, theme, stats, download
+from .routers import auth, bili, local, play, system, theme, stats, download, logs, debug
 _diag(".routers imported")
 
 _diag("Importing .services ...")
@@ -86,6 +97,13 @@ server_config = config.get_server_config()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 启动时执行
+    # [新增] 安装全局异常钩子：未捕获异常会完整落入日志与错误系统
+    try:
+        from .core.log_manager import install_excepthook
+        install_excepthook()
+    except Exception as e:
+        logger.debug(f"安装全局异常钩子失败（忽略）: {e}")
+
     logger.info("正在初始化数据库...")
     
     # 1. 执行数据库迁移检查
@@ -93,6 +111,13 @@ async def lifespan(app: FastAPI):
         run_migrations()
     except Exception as e:
         logger.error(f"数据库迁移执行失败: {e}")
+        try:
+            from .core.error_manager import get_error_manager
+            get_error_manager().report_exception(
+                e, scope='database', message='数据库迁移执行失败',
+                dedupe_key='migration')
+        except Exception:
+            pass
     models.Base.metadata.create_all(bind=db.engine)
     from .services.clipboard_service import get_thread_safe_db_session
     
@@ -205,6 +230,8 @@ app.include_router(system.router)
 app.include_router(theme.router)
 app.include_router(stats.router)
 app.include_router(download.router)
+app.include_router(logs.router)
+app.include_router(debug.router)
 
 # 代理 B 站图片以解决防盗链问题
 from fastapi import Response
@@ -260,16 +287,44 @@ async def shutdown_event():
     logger.info("封面缓存服务已关闭")
 
 # 日志中间件
+#
+# 说明：这里排除的路径都是「高频轮询」或「会自身产生日志查询」的接口。
+# 尤其是 /api/logs/list、/api/logs/export 这类日志查询接口——
+# 如果记录它们自身的请求 URL，被查询的关键字会出现在它自己的日志里，
+# 造成「搜索结果里永远有它自己」的干扰（用户会误以为筛选没生效）。
+_NOISY_PATH_SUFFIXES = (
+    '/system/events',
+    '/download/status',
+    '/system/clipboard/pending',
+    '/logs/stream',
+    '/logs/list',
+    '/logs/export',
+    '/logs/stats',
+    '/logs/meta',
+    '/logs/files',
+)
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    # 忽略高频轮询请求的日志，并将普通请求降级为 DEBUG
-    if not request.url.path.endswith(('/system/events', '/download/status', '/system/clipboard/pending')):
+    # 忽略高频轮询与日志查询请求，并将其余请求降级为 DEBUG
+    if not request.url.path.endswith(_NOISY_PATH_SUFFIXES):
         logger.debug(f"📡 [请求] {request.method} {request.url}")
     try:
         response = await call_next(request)
         return response
     except Exception as e:
         logger.error(f"❌ [错误] {e}")
+        # [新增] 未处理的 HTTP 层异常统一进入错误系统
+        try:
+            from .core.error_manager import get_error_manager
+            get_error_manager().report_exception(
+                e, scope='api',
+                message=f'接口处理失败: {request.method} {request.url.path}',
+                context={'path': request.url.path, 'method': request.method},
+                dedupe_key=f'api:{request.url.path}', popup=False)
+        except Exception:
+            pass
         raise e
 
 if __name__ == "__main__":

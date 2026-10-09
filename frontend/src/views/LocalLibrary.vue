@@ -649,7 +649,8 @@ async function handleBatchCache() {
   for (const bvid of store.selectedBvids) {
     const v = store.localVideos.find(i => i.bvid === bvid)
     if (v && v.download_status !== 'completed' && v.download_status !== 'pending') {
-      try { await store.addToDownload(bvid); count++ } catch (e) { }
+      // [修复] 失败过的媒体走重试语义（服务端会清零重试计数并清理损坏残留）
+      try { await store.addToDownload(bvid, v.download_status === 'failed'); count++ } catch (e) { }
     }
   }
   if (count > 0) {
@@ -1341,7 +1342,7 @@ function handleContextMenuSelect(item) {
                     <span v-else-if="v.download_status === 'completed'" class="text-[8px] font-black text-green-500 bg-green-500/10 px-2 py-1 rounded-lg border border-green-500/10 uppercase tracking-tighter flex items-center gap-1">
                       <CheckCircleIcon class="w-2.5 h-2.5" /> 已存
                     </span>
-                    <button v-else-if="v.download_status === 'failed'" @click.stop="store.addToDownload(v.bvid)" class="text-[8px] font-black text-red-500 uppercase tracking-tighter underline active:scale-95 transition">重试</button>
+                    <button v-else-if="v.download_status === 'failed'" @click.stop="store.addToDownload(v.bvid, true)" class="text-[8px] font-black text-red-500 uppercase tracking-tighter underline active:scale-95 transition">重试</button>
                     <button v-else @click.stop="store.addToDownload(v.bvid)" :disabled="v.download_status === 'pending' || v.download_status === 'downloading'" class="text-[8px] font-black text-gray-400 hover:text-blue-500 transition border border-current px-2 py-1 rounded-lg disabled:opacity-30 disabled:cursor-not-allowed active:scale-95">下载</button>
                   </div>
                 </div>

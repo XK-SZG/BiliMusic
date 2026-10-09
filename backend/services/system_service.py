@@ -54,7 +54,10 @@ def execute_factory_reset(db_session: Session, bili):
 
     from ..core.paths import DATA_DIR
     base_dir = DATA_DIR
-    directories = ["stickers", "backgrounds", "particles", "covers", "downloads", "fonts", "img_cache"]
+    # [修复] 新增 failed_downloads（下载失败残留隔离区）与 logs（运行日志），
+    # 确保「重置软件」后不会遗留上一次运行的失败残留与日志文件
+    directories = ["stickers", "backgrounds", "particles", "covers", "downloads",
+                   "fonts", "img_cache", "failed_downloads", "logs"]
     
     for d in directories:
         d_path = os.path.join(base_dir, d)

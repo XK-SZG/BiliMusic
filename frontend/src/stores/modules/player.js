@@ -8,11 +8,10 @@ import authApi from '../../api/auth'
 import biliApi from '../../api/bili'
 import localApi from '../../api/local'
 import systemApi from '../../api/system'
+import { API_BASE } from '../../api/request'
 import statsApi from '../../api/stats'
 
-const isDev = window.location.port === '5173' || window.location.port === '3000'
-const isElectron = window.location.protocol === 'file:'
-const API_BASE = import.meta.env.VITE_API_URL || (isDev || isElectron ? 'http://127.0.0.1:12180/api' : `${window.location.origin}/api`)
+// API 基址统一由 api/request.js 推导（开发环境为同源 /api，由 vite 代理到后端）
 
 export const usePlayerStore = defineStore('player', {
   state: () => ({
@@ -44,6 +43,9 @@ export const usePlayerStore = defineStore('player', {
     activeDownloadCount: 0,
     globalDownloadProgress: 0,
     toast: { show: false, msg: '', type: 'info' },
+    // [新增] 错误系统：待用户处理的错误队列（由 SSE 推送填充，ErrorDialog 消费）
+    pendingErrors: [],
+    errorHistory: [],
     currentTime: 0,
     duration: 0,
     buffered: 0,
@@ -74,6 +76,62 @@ export const usePlayerStore = defineStore('player', {
     showToast(msg, type = 'info') {
       this.toast.msg = msg; this.toast.type = type; this.toast.show = true
       setTimeout(() => { this.toast.show = false }, 3000)
+    },
+
+    // ============================================================
+    // 错误系统（由 App.vue 的 SSE 事件驱动）
+    // ============================================================
+
+    /**
+     * 处理后端推送的错误事件。
+     * @param {Object} payload { type, error, popup }
+     */
+    handleErrorMessage(payload) {
+      const err = payload?.error
+      if (!err || !err.id) return
+      // 去重：同一个错误只保留一条待处理记录
+      if (!this.pendingErrors.some(e => e.id === err.id)) {
+        this.pendingErrors.push(err)
+      }
+      if (!this.errorHistory.some(e => e.id === err.id)) {
+        this.errorHistory.unshift({
+          id: err.id, code: err.code, title: err.title,
+          message: err.message, time: err.time, status: err.status
+        })
+        if (this.errorHistory.length > 100) this.errorHistory.pop()
+      }
+      // popup=false 表示该错误类型已被用户设为「不再弹窗」
+      if (payload.popup === false) {
+        this.removePendingError(err.id)
+      }
+    },
+
+    /** 处理后端推送的错误已处理事件 */
+    handleErrorResolvedMessage(payload) {
+      if (!payload?.error_id) return
+      this.removePendingError(payload.error_id)
+      const item = this.errorHistory.find(e => e.id === payload.error_id)
+      if (item) {
+        item.status = payload.status
+        item.resolution = payload.resolution
+      }
+    },
+
+    removePendingError(errorId) {
+      const idx = this.pendingErrors.findIndex(e => e.id === errorId)
+      if (idx > -1) this.pendingErrors.splice(idx, 1)
+    },
+
+    /** 关闭当前错误弹窗（标记为已查看，但保留在错误列表中） */
+    async dismissCurrentError() {
+      const current = this.pendingErrors[0]
+      if (!current) return
+      this.removePendingError(current.id)
+      try {
+        await systemApi.markErrorViewed(current.id)
+      } catch (e) {
+        // 标记失败不影响用户继续操作
+      }
     },
 
     async init() {
@@ -331,9 +389,14 @@ export const usePlayerStore = defineStore('player', {
       return []
     },
 
-    async fetchLocalVideos() {
-      const data = await localApi.getVideos()
-      this.localVideos = data.map(v => ({ ...v, progress: v.download_status === 'completed' ? 100 : 0 }))
+    async fetchLocalVideos(isSilent = false) {
+      try {
+        const data = await localApi.getVideos()
+        this.localVideos = data.map(v => ({ ...v, progress: v.download_status === 'completed' ? 100 : 0 }))
+      } catch (e) {
+        if (!isSilent) throw e
+        console.error('获取本地媒体库失败', e)
+      }
     },
 
     async fetchLocalCollections() {
@@ -424,13 +487,30 @@ export const usePlayerStore = defineStore('player', {
       await this.fetchLocalVideos()
     },
 
-    async addToDownload(bvid) {
+    /**
+     * 加入下载队列。
+     * @param {string} bvid
+     * @param {boolean} isRetry 是否为「重试」语义。
+     *   [修复] 重试会调用 /download/retry，该接口会在服务端清零失败重试计数并
+     *   清理损坏残留文件——否则一旦某个媒体累计失败达到上限，
+     *   之后每次重试都会在第一次失败后立刻放弃，表现为「该媒体永远下载不了」。
+     */
+    async addToDownload(bvid, isRetry = false) {
       const settingsStore = useSettingsStore()
       this.downloadSession.add(bvid)
+      const v = this.localVideos.find(i => i.bvid === bvid)
+      // 状态为 failed，或调用方显式要求重试时，走重试语义
+      const retrySemantics = isRetry || v?.download_status === 'failed'
       try {
-        await systemApi.addToDownload(bvid, settingsStore.settings.cacheQuality)
-        const v = this.localVideos.find(i => i.bvid === bvid); if (v) v.download_status = 'pending'
-      } catch (e) { this.downloadSession.delete(bvid) }
+        if (retrySemantics) {
+          await systemApi.retryDownload(bvid, settingsStore.settings.cacheQuality)
+        } else {
+          await systemApi.addToDownload(bvid, settingsStore.settings.cacheQuality)
+        }
+        if (v) v.download_status = 'pending'
+      } catch (e) {
+        this.downloadSession.delete(bvid)
+      }
     },
 
     async cancelDownload(bvid) {
@@ -484,8 +564,9 @@ export const usePlayerStore = defineStore('player', {
             v.download_status = task.status
             v.progress = task.progress
           } else if (v.download_status === 'pending' || v.download_status === 'downloading') {
-            v.download_status = 'completed'
-            v.progress = 100
+            // [修复] 任务从活跃列表中消失时，此前的实现会无条件标记为 completed。
+            // 但任务也可能因为失败 / 被取消而消失，于是「下载失败」会被误显示为「已下载」。
+            // 现在改为从后端拉取真实状态后再刷新列表。
             needRefresh = true
           }
         })
@@ -497,7 +578,8 @@ export const usePlayerStore = defineStore('player', {
       if (this.currentVideo) updateList([this.currentVideo])
       
       if (needRefresh) {
-        this.fetchLocalVideos()
+        // 从后端拉取权威状态（completed / failed / not_downloaded 均会正确回显）
+        this.fetchLocalVideos(true)
       }
       
       // [修复] 活跃下载数应为所有未完成任务的总和（含等待中），而不是仅显示正在 downloading 的 3 个
@@ -510,7 +592,18 @@ export const usePlayerStore = defineStore('player', {
           const task = tasks.find(t => t.bvid === bvid); const localV = this.localVideos.find(v => v.bvid === bvid)
           if (task) totalSum += (task.progress || 0)
           else if (localV && localV.download_status === 'completed') { totalSum += 100; completed++ }
-          else { totalSum += 100; completed++ }
+          else if (localV && localV.download_status === 'failed') {
+            // [修复] 下载失败的任务不应被算作已完成，否则进度条会假性走满并淡出
+            totalSum += 100
+            this.downloadSession.delete(bvid)
+          } else if (localV && localV.download_status === 'not_downloaded') {
+            // 被取消或未开始，同样不计入完成
+            this.downloadSession.delete(bvid)
+          } else {
+            // 状态尚未回显（后端仍在收尾），暂按完成处理，由下一次刷新纠正
+            totalSum += 100
+            completed++
+          }
         })
         this.globalDownloadProgress = totalSum / sessionBvids.length
         if (completed === sessionBvids.length && this.globalDownloadProgress >= 99.9) {

@@ -10,6 +10,7 @@ import Sidebar from './components/Sidebar.vue'
 import PlayerBar from './components/PlayerBar.vue'
 import TitleBar from './components/TitleBar.vue'
 import AgreementModal from './components/AgreementModal.vue'
+import ErrorDialog from './components/ErrorDialog.vue'
 import systemApi from './api/system'
 
 const isElectron = !!window.require
@@ -279,6 +280,14 @@ onMounted(async () => {
     (downloadState) => {
       // 实时更新下载状态
       store.updateDownloadStateFromSSE(downloadState)
+    },
+    (errorPayload) => {
+      // 错误系统：后端产生「会导致业务逻辑终止」的错误时弹窗提示
+      store.handleErrorMessage(errorPayload)
+    },
+    (resolvedPayload) => {
+      // 错误已被处理（修复 / 绕过 / 查看）
+      store.handleErrorResolvedMessage(resolvedPayload)
     }
   )
 })
@@ -549,6 +558,9 @@ watch(() => settingsStore.settings.videoFitMode, () => { syncVideoElement() })
 
     <!-- 用户协议弹窗 -->
     <AgreementModal :show="showAgreementModal" @agree="handleAgree" @decline="handleDecline" />
+
+    <!-- 错误系统弹窗：业务逻辑终止时提示用户，并提供一键修复 / 绕过 / 诊断包 -->
+    <ErrorDialog />
 
     <!-- 关机预警弹窗 -->
     <transition name="toast-fade">

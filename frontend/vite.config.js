@@ -21,7 +21,21 @@ export default defineConfig({
     port: 3000,
     strictPort: true,
     // 自动打开浏览器
-    open: false
+    open: false,
+    // 把 /api 代理到后端。
+    // 这样前端无论通过 127.0.0.1、localhost 还是其它端口访问，
+    // 走同源相对路径都能正常请求后端，不再依赖「判断端口号」这种脆弱逻辑。
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:12180',
+        changeOrigin: true
+      },
+      // 后端静态挂载的媒体目录，同样走代理
+      '/local_covers': { target: 'http://127.0.0.1:12180', changeOrigin: true },
+      '/local_stickers': { target: 'http://127.0.0.1:12180', changeOrigin: true },
+      '/local_backgrounds': { target: 'http://127.0.0.1:12180', changeOrigin: true },
+      '/downloads': { target: 'http://127.0.0.1:12180', changeOrigin: true }
+    }
   },
   optimizeDeps: {
     include: ['echarts', 'axios', 'vue', 'vue-router', 'pinia']

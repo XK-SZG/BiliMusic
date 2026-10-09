@@ -17,6 +17,20 @@ def add_to_download_queue(bvid: str, quality: int = 80, downloader = Depends(get
         raise HTTPException(status_code=400, detail="添加失败，可能已在队列中或已下载")
     return {"message": "已加入下载队列"}
 
+@router.post("/retry/{bvid}")
+def retry_download(bvid: str, quality: int = 80, downloader = Depends(get_downloader)):
+    """[修复] 手动重试下载：清零失败重试计数并清理失败残留。
+
+    历史缺陷：``/add`` 不会重置 ``download_retry_count``，因此一旦某个媒体
+    累计失败达到上限，之后每次「重试」都会在第一次失败后立刻被判为
+    「失败次数过多，放弃」，表现为「该媒体永远无法下载」。
+    """
+    success = downloader.retry_download(bvid, quality=quality)
+    if not success:
+        raise HTTPException(status_code=400, detail="重试失败，可能已在队列中或已下载")
+    logger.info(f"已重置重试计数并重新加入下载队列: {bvid}")
+    return {"message": "已重置重试计数并重新加入下载队列"}
+
 @router.post("/cancel/{bvid}")
 def cancel_download(bvid: str, db_session: Session = Depends(db.get_db)):
     """取消下载任务"""

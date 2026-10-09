@@ -20,6 +20,17 @@ scheduler:
 download:
   max_workers: 3              # 并发下载线程数
   max_retries: 3              # 下载失败最大重试次数
+  keep_failed_files: true     # 失败时把未完成的残留文件移入 data/failed_downloads 隔离区
+
+# 日志配置
+logging:
+  level: "DEBUG"              # 根日志级别：DEBUG / INFO / WARNING / ERROR / CRITICAL
+  console: true               # 是否同时输出到控制台（Electron 主进程日志）
+  file_enabled: true          # 是否写入物理日志文件
+  memory_capacity: 20000      # 界面可查看的内存日志条数上限
+  max_file_mb: 5              # 单个日志文件的体积上限 (MB)，写满后自动轮转
+  max_files: 5                # 保留的日志文件数量上限，超出后删除最旧的归档
+  max_total_mb: 25            # 日志目录的总占用上限 (MB)，超出后按最旧优先回收
 
 # 数据库配置
 database:

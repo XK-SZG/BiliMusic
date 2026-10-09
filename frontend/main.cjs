@@ -262,6 +262,25 @@ function createWindow() {
     }
   })
 
+  // 在系统文件管理器中打开目录。
+  // 后端（Python）在「隐藏窗口」方式启动时，os.startfile 可能返回 WinError 5（拒绝访问），
+  // 交由 Electron 主进程调用 shell.openPath 更稳妥。
+  ipcMain.handle('open-directory', async (event, dirPath) => {
+    try {
+      if (!dirPath || typeof dirPath !== 'string') {
+        return { ok: false, error: '目录路径无效' }
+      }
+      const errorMsg = await shell.openPath(dirPath)
+      if (errorMsg) {
+        // openPath 返回非空字符串表示失败原因
+        return { ok: false, error: errorMsg }
+      }
+      return { ok: true, path: dirPath }
+    } catch (e) {
+      return { ok: false, error: e && e.message ? e.message : String(e) }
+    }
+  })
+
   ipcMain.handle('show-save-dialog', async (event, options) => {
     const result = await dialog.showSaveDialog(mainWindow, options)
     return result.canceled ? null : result.filePath

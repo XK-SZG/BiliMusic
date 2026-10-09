@@ -1,6 +1,7 @@
 import os
 import json
 import base64
+import asyncio
 import logging
 import platform
 import subprocess
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 from ..database import models, db
 from ..services import cleanup_service, download_service
 from ..dependencies import get_bili, get_downloader
+from ..core import error_manager
 
 logger = logging.getLogger(__name__)
 
@@ -24,70 +26,225 @@ except Exception:
     _memory_handler = None
 
 @router.get("/logs")
-def get_system_logs():
-    """获取系统运行日志"""
+def get_system_logs(limit: int = 1000, newest_first: bool = True):
+    """获取系统运行日志（兼容旧接口，最新在前）。
+
+    [修复] 旧实现把内部记录原样返回（字段为 ``time`` 的 epoch 浮点数），
+    前端 ``new Date(1770000000)`` 会被解释成 1970 年，这正是界面上
+    「日志时间从 1970 年开始」的根因。现在统一返回带时区的可读时间字符串。
+    """
     if _memory_handler is not None:
-        return {"logs": _memory_handler.get_logs()}
+        records = _memory_handler.buffer.query(limit=limit, newest_first=newest_first)
+        return {"logs": records, "count": len(records),
+                "latest_seq": _memory_handler.buffer.latest_seq()}
     return {"logs": [], "warning": "内存日志处理器未加载，请检查 log_manager.py 是否被打包"}
 
 @router.get("/events")
 async def system_events(request: Request):
-    """SSE 全局事件总线（替代前端轮询）"""
-    import asyncio
-    
+    """SSE 全局事件总线（替代前端轮询）
+
+    事件类型：
+    - ``clipboard_pending``：剪贴板检测到新的 BV 号
+    - ``download_status``：下载队列 / 进度变化
+    - ``error``：错误系统产生了一条需要用户处理的错误（触发前端弹窗）
+    - ``error_resolved``：错误已被处理（修复 / 绕过 / 查看）
+    """
+    # 错误事件通过队列从同步的错误系统桥接到异步生成器
+    error_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+    loop = asyncio.get_running_loop()
+
+    def _on_error(payload):
+        def _put():
+            try:
+                error_queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                pass
+        try:
+            loop.call_soon_threadsafe(_put)
+        except Exception:
+            pass
+
+    remove_listener = error_manager.get_error_manager().add_listener(_on_error)
+
     async def event_publisher():
         from ..services.clipboard_service import pending_bvids, pending_lock
         from ..services import download_service
         from ..database import db, models
-        
+
         last_clipboard_bvids = []
         last_download_state = None
-        
-        while True:
-            if await request.is_disconnected():
-                break
-                
-            # 1. 剪贴板状态检测
-            with pending_lock:
-                current_bvids = list(pending_bvids)
-            if current_bvids != last_clipboard_bvids:
-                last_clipboard_bvids = current_bvids
-                if current_bvids:
-                    # 通知前端有新的剪贴板数据
-                    yield f"event: clipboard_pending\ndata: {json.dumps({'count': len(current_bvids)})}\n\n"
-            
-            # 2. 下载状态检测
+
+        try:
+            # 连接建立时补发当前未处理的错误，避免前端刷新后漏掉弹窗
             try:
-                # 使用瞬时 session 避免长事务阻塞
-                with db.SessionLocal() as session:
-                    processing = session.query(models.Video).filter(
-                        models.Video.download_status.in_(['pending', 'downloading'])
-                    ).all()
-                    
-                    tasks = []
-                    for v in processing:
-                        tasks.append({
-                            "bvid": v.bvid,
-                            "title": v.title,
-                            "status": v.download_status,
-                            "progress": download_service.progress_cache.get(v.bvid, 0)
-                        })
-                    
-                    current_download_state = {
-                        "tasks": tasks,
-                        "queue_size": download_service.download_queue.qsize()
-                    }
-                    
-                    if current_download_state != last_download_state:
-                        last_download_state = current_download_state
-                        yield f"event: download_status\ndata: {json.dumps(current_download_state)}\n\n"
+                pending = error_manager.get_error_manager().list_errors(
+                    status='pending', limit=20)
+                for item in reversed(pending):
+                    yield (f"event: error\ndata: "
+                           f"{json.dumps({'type': 'error', 'error': item, 'popup': True}, ensure_ascii=False)}\n\n")
             except Exception as e:
-                logger.error(f"SSE 下载状态查询异常: {e}")
-                
-            yield ": ping\n\n"
-            await asyncio.sleep(1)
+                logger.debug(f"SSE 补发未处理错误失败: {e}")
+
+            while True:
+                if await request.is_disconnected():
+                    break
+
+                # 0. 错误系统事件（最高优先级，立即下发）
+                while not error_queue.empty():
+                    try:
+                        payload = error_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    event_name = 'error'
+                    if payload.get('type') == 'error_resolved':
+                        event_name = 'error_resolved'
+                    yield (f"event: {event_name}\ndata: "
+                           f"{json.dumps(payload, ensure_ascii=False)}\n\n")
+
+                # 1. 剪贴板状态检测
+                with pending_lock:
+                    current_bvids = list(pending_bvids)
+                if current_bvids != last_clipboard_bvids:
+                    last_clipboard_bvids = current_bvids
+                    if current_bvids:
+                        # 通知前端有新的剪贴板数据
+                        yield f"event: clipboard_pending\ndata: {json.dumps({'count': len(current_bvids)})}\n\n"
+
+                # 2. 下载状态检测
+                try:
+                    # 使用瞬时 session 避免长事务阻塞
+                    with db.SessionLocal() as session:
+                        processing = session.query(models.Video).filter(
+                            models.Video.download_status.in_(['pending', 'downloading'])
+                        ).all()
+
+                        tasks = []
+                        for v in processing:
+                            tasks.append({
+                                "bvid": v.bvid,
+                                "title": v.title,
+                                "status": v.download_status,
+                                "progress": download_service.progress_cache.get(v.bvid, 0)
+                            })
+
+                        current_download_state = {
+                            "tasks": tasks,
+                            "queue_size": download_service.download_queue.qsize()
+                        }
+
+                        if current_download_state != last_download_state:
+                            last_download_state = current_download_state
+                            yield f"event: download_status\ndata: {json.dumps(current_download_state)}\n\n"
+                except Exception as e:
+                    logger.error(f"SSE 下载状态查询异常: {e}")
+
+                yield ": ping\n\n"
+                await asyncio.sleep(1)
+        finally:
+            try:
+                remove_listener()
+            except Exception:
+                pass
 
     return StreamingResponse(event_publisher(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive"})
+
+
+# ============================================================
+# 错误系统接口
+# ============================================================
+
+@router.get("/errors")
+def list_errors(status: str = None, limit: int = 100):
+    """列出错误记录（默认返回全部，按时间倒序）。"""
+    manager = error_manager.get_error_manager()
+    return {
+        "errors": manager.list_errors(status=status, limit=limit),
+        "pending": manager.pending_count(),
+    }
+
+
+@router.get("/errors/catalog")
+def get_error_catalog():
+    """返回错误百科（所有已登记的错误类型与处置建议）。"""
+    return {"catalog": error_manager.catalog_as_list()}
+
+
+@router.get("/errors/{error_id}")
+def get_error(error_id: str):
+    """获取单条错误详情。"""
+    record = error_manager.get_error_manager().get(error_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="错误记录不存在或已被清理")
+    return {"error": record.to_dict()}
+
+
+@router.post("/errors/{error_id}/viewed")
+def mark_error_viewed(error_id: str):
+    """标记错误为「已查看」。"""
+    record = error_manager.get_error_manager().mark_viewed(error_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="错误记录不存在")
+    return {"status": "success", "error": record.to_dict()}
+
+
+@router.post("/errors/{error_id}/bypass")
+def bypass_error(error_id: str, payload: dict = None):
+    """绕过该错误继续业务逻辑。"""
+    manager = error_manager.get_error_manager()
+    record = manager.bypass(error_id, note=(payload or {}).get("note"))
+    if record is None:
+        raise HTTPException(status_code=404, detail="错误记录不存在")
+    return {"status": "success", "message": "已绕过该错误", "error": record.to_dict()}
+
+
+@router.post("/errors/{error_id}/repair")
+def repair_error(error_id: str):
+    """对该错误执行一键修复。"""
+    manager = error_manager.get_error_manager()
+    ok, message, record = manager.repair(error_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="错误记录不存在或已被清理")
+    return {"status": "success" if ok else "failed", "message": message,
+            "error": record.to_dict()}
+
+
+@router.post("/errors/{error_id}/suppress")
+def suppress_error(error_id: str, suppressed: bool = True):
+    """设置该类错误是否继续弹窗提示。"""
+    manager = error_manager.get_error_manager()
+    record = manager.get(error_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="错误记录不存在")
+    manager.suppress_code(record.code, suppressed=suppressed)
+    return {"status": "success", "code": record.code, "suppressed": suppressed,
+            "message": f"已{'关闭' if suppressed else '开启'}「{record.title}」的弹窗提示"}
+
+
+@router.get("/errors/{error_id}/package")
+def download_error_package(error_id: str, include_logs: bool = True, note: str = None):
+    """生成并下载诊断包（ZIP）。
+
+    包含：错误详情、环境快照、最近日志、可读摘要。
+    所有内容在打包前已执行敏感信息脱敏，且**不会**包含任何凭据或用户媒体数据。
+    """
+    manager = error_manager.get_error_manager()
+    record = manager.get(error_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="错误记录不存在或已被清理")
+    try:
+        payload, _ = manager.build_diagnostics(
+            error_id=error_id, include_logs=include_logs, note=note)
+    except Exception as e:
+        logger.error(f"生成诊断包失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"生成诊断包失败: {e}")
+
+    filename = f"BiliMusic-diagnostic-{record.code}-{record.id}.zip"
+    logger.info(f"[错误系统] 已生成诊断包: {filename} ({len(payload)} 字节)")
+    return Response(
+        content=payload,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 @router.post("/shutdown")
 def system_shutdown():

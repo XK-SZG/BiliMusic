@@ -1,222 +1,142 @@
-# BiliMusic 性能测试工具使用指南
+# BiliMusic 测试与自检
 
 ## 目录结构
+
 ```
 tests/
-├── simple_test.py           # 简单的 API 连通性测试
-├── load_test.py             # Locust 压力测试脚本（使用随机数据）
-├── realistic_load_test.py   # 实用压测脚本（使用真实数据）⭐ 推荐
-└── README.md                # 本文件
+├── verify_backend_v1021.py      # 后端自检脚本（日志 / 错误 / 调试 / 下载修复）
+├── check_api_wiring.cjs         # 前端 ↔ 后端 接线静态校验
+├── check_api_wiring_selftest.cjs # 接线校验脚本自身的负向自检
+└── README.md                    # 本文件
 ```
 
-## 一、前置准备
+> 说明：本目录此前记载的 `simple_test.py`、`load_test.py`、`realistic_load_test.py`
+> 已被移除（见 `CHANGELOG.md` 1.0.20「清理测试脚本」），相关文档亦不存在。
+> 本文件已按当前仓库的真实内容重写。
 
-### 1.1 确保后端服务已启动
+---
+
+## 〇、前端 ↔ 后端接线校验（建议每次改前端 API 后执行）
+
 ```bash
-# 在项目根目录运行
+node tests/check_api_wiring.cjs          # 接线校验
+node tests/check_api_wiring_selftest.cjs # 校验脚本自身的负向自检
+```
+
+该脚本扫描 `frontend/src` 与 `backend/routers`，做两项交叉校验：
+
+| 检查 | 内容 | 拦截过的真实缺陷 |
+|---|---|---|
+| A | 组件调用的 `xxxApi.方法()` 是否真的在对应模块中导出 | `systemApi.getStats is not a function`（实现写在 `api/logs.js`，组件却从 `systemApi` 调用） |
+| B | 受 `require_debug_token` 保护的后端接口，前端是否携带 `X-Debug-Token`，调用方首个参数是否为令牌 | 刷新审计日志报 403「令牌校验失败」（`getDebugAudit` 漏传令牌） |
+
+- 全部通过输出 `检查通过：未发现接线问题`，退出码 `0`；
+- 存在问题逐条打印「文件:行号 + 问题描述」，退出码 `1`。
+
+`check_api_wiring_selftest.cjs` 会把 `getDebugAudit` 临时改回「漏传令牌」的写法，
+确认校验脚本确实能检出该缺陷，然后自动恢复文件并复查。**它不应该修改留下任何改动**。
+
+---
+
+## 一、后端自检脚本`verify_backend_v1021.py`
+
+### 1.1 它做什么
+
+`verify_backend_v1021.py` 以**进程内**方式启动 FastAPI 应用（使用 `TestClient`，
+**不占用真实端口**），并额外拉起一个临时的 `uvicorn` 进程用于验证 SSE 长连接。
+共 100+ 项断言，覆盖：
+
+| 章节 | 内容 |
+|---|---|
+| 1. 日志系统 | 时间戳与系统时间同步、物理文件落盘、无 1970 时间戳、关键字/级别/排除/时间区间/心跳屏蔽的叠加筛选、增量拉取、导出 TXT/JSON、保留策略调整、删除确认 |
+| 2. 错误系统 | 错误分类（Errno 22 → `DOWNLOAD_CONSOLE_IO`）、去重合并、错误百科、一键修复、绕过、标记已查看、诊断包 ZIP 结构与脱敏 |
+| 3. 调试系统 | 协议闸门（未逐项确认必须被拒绝）、令牌鉴权、错误令牌拒绝、运行场景快照、受限表达式、危险表达式拦截、命令白名单、只读 SQL 限制、审计日志、令牌轮换与销毁 |
+| 4. 下载系统 | yt-dlp 安全输出选项、坏流写入被守卫吞掉、手动重试接口 |
+| 5. 敏感信息脱敏 | SESSDATA / bili_jct / token 必须被脱敏 |
+| 6. 实时推送（SSE） | 真实 HTTP 服务下的日志实时推送、错误事件补发、心跳帧 |
+| 7. 日志轮转与回收 | 单文件体积轮转、文件数量上限、总占用上限、上限收紧后立即回收 |
+
+### 1.2 前置条件
+
+后端依赖已安装（`pip install -r requirements.txt`）即可，**不需要**先启动后端服务。
+
+### 1.3 运行
+
+在项目根目录执行：
+
+```bash
+.venv\Scripts\python.exe tests\verify_backend_v1021.py
+```
+
+（Windows PowerShell 下可直接使用 `& .venv\Scripts\python.exe -B -u tests\verify_backend_v1021.py`）
+
+### 1.4 预期输出
+
+每一项断言都会打印 `[PASS]` 或 `[FAIL]`，结尾给出汇总：
+
+```
+==================================================================
+  通过 97 项，失败 0 项
+==================================================================
+```
+
+退出码：全部通过为 `0`，存在失败为 `1`（可用于脚本化门禁）。
+
+### 1.5 安全说明
+
+- 脚本**不会**触发关机、休眠、重置软件、卸载等破坏性操作；
+- 脚本会读取 `backend/data/` 下的运行数据以统计状态，但**不读取也不输出**
+  `bili_cookies.json` 与 `bili_user_info.json` 的内容；
+- 脚本会在 `backend/data/logs/` 写入测试日志，并临时调整日志保留策略
+  （结束时恢复默认值）；
+- SSE 验证会临时占用端口 `12199`，结束后立即释放。
+
+---
+
+## 二、其他验证手段
+
+当前仓库**没有**配置任何自动化测试框架或 CI，也没有 lint / 格式化门禁
+（详见 `AGENTS.md` 第 2.5、4.5 节）。除本自检脚本外，可用的验证手段为：
+
+### 2.1 后端手工验证
+
+```bash
 python run_backend.py
 ```
-后端应该在 `http://127.0.0.1:12180` 上运行。
 
+服务监听 `http://127.0.0.1:12180`，可直接访问：
 
-### 1.2 安装测试依赖
-```bash
-pip install locust requests
-```
+- `http://127.0.0.1:12180/docs` —— FastAPI 自动生成的接口文档
+- `GET /api/logs/stats` —— 日志系统状态
+- `POST /api/debug/enable` —— 需要在界面中先完成协议确认
 
-## 二、快速测试（推荐新手）
-
-### 2.1 运行简单测试
-这个脚本会测试几个基本的 API 端点，验证后端是否正常运行：
+### 2.2 前端构建验证
 
 ```bash
-python tests/simple_test.py
+cd frontend
+npm run build
 ```
 
-**预期输出：**
-```
-============================================================
-BiliMusic 后端 API 简单测试
-============================================================
+该命令会完整编译所有 `.vue` 单文件组件；构建失败通常意味着模板结构或脚本语法有问题。
 
-✓ GET /local/videos
-  状态码: 200
-  响应时间: 45.23ms
-  响应数据: [...]
-
-✓ GET /local/collections
-  状态码: 200
-  响应时间: 32.15ms
-  响应数据: [...]
-
-...
-
-============================================================
-测试完成: 4/4 通过
-============================================================
-
-✓ 所有测试通过！后端服务运行正常
-```
-
-如果看到 "无法连接到服务器" 错误，请确保后端已启动。
-
-## 三、压力测试（进阶）
-
-### 3.1 推荐：使用真实数据压测 ⭐
-这个脚本会自动从数据库获取真实的 BVID，避免大量 404 错误：
+### 2.3 前端联调
 
 ```bash
-locust -f tests/realistic_load_test.py --host=http://127.0.0.1:12180
+cd frontend
+npm run electron:dev
 ```
 
-### 3.2 启动 Locust Web UI
-这是最直观的方式，提供了实时图表和控制面板：
+---
 
-```bash
-# 使用真实数据（推荐）
-locust -f tests/realistic_load_test.py --host=http://127.0.0.1:12180
+## 三、编写新测试的建议
 
-# 或使用随机数据（会有较多 404）
-locust -f tests/load_test.py --host=http://127.0.0.1:12180
-```
+1. 优先扩展现有的 `verify_backend_v1021.py`，保持「进程内 + 断言清单」的风格；
+2. 涉及长连接（SSE）的验证请使用真实的 `uvicorn` 子进程 + `requests` 流式读取，
+   不要使用 `TestClient`（长连接无法安全中断，会导致脚本挂起）；
+3. 任何测试都**不得**读取或输出 `backend/data/` 下的凭据类文件
+   （见 `AGENTS.md` 第 3.1 节）；
+4. 任何测试都**不得**触发关机、休眠、重置软件、卸载等破坏性操作。
 
-然后在浏览器中打开 `http://localhost:8089`，你会看到 Locust 的 Web 界面。
+---
 
-**配置参数：**
-- **Number of users (peak concurrency)**: 并发用户数，建议从 10 开始
-- **Spawn rate (users started/second)**: 每秒增加的用户数，建议 2-5
-- **Host**: 已自动填充为 `http://127.0.0.1:12180`
-
-点击 "Start swarming" 开始压测。
-
-### 3.3 命令行模式（无 UI）
-适合自动化测试或 CI/CD 集成：
-
-```bash
-# 使用真实数据：50 个用户，每秒增加 5 个，持续 60 秒
-locust -f tests/realistic_load_test.py --host=http://127.0.0.1:12180 \
-  --users 50 --spawn-rate 5 --run-time 60s --headless
-
-# 使用随机数据：100 个用户（会有较多 404）
-locust -f tests/load_test.py --host=http://127.0.0.1:12180 \
-  --users 100 --spawn-rate 10 --run-time 60s --headless
-```
-
-**参数说明：**
-- `--users 100`: 最大并发用户数
-- `--spawn-rate 10`: 每秒增加 10 个用户
-- `--run-time 60s`: 运行 60 秒后自动停止
-- `--headless`: 无 Web UI，直接在终端输出结果
-
-### 3.3 自定义压测场景
-
-#### 场景 1: 高并发流媒体代理测试
-```bash
-locust -f tests/load_test.py --host=http://127.0.0.1:12180 \
-  HighConcurrencyScenario --users 50 --spawn-rate 10 --run-time 120s --headless
-```
-
-#### 场景 2: 下载队列压测（测试断路器）
-```bash
-locust -f tests/load_test.py --host=http://127.0.0.1:12180 \
-  DownloadQueueScenario --users 20 --spawn-rate 5 --run-time 60s --headless
-```
-
-## 四、结果分析
-
-### 4.1 关键指标
-
-Locust 会输出以下关键指标：
-
-| 指标 | 说明 | 理想值 |
-|------|------|--------|
-| **Total Requests** | 总请求数 | 越多越好 |
-| **Failures** | 失败请求数 | 越少越好 (<1%) |
-| **Average Response Time** | 平均响应时间 | <100ms |
-| **P95 Response Time** | 95% 请求的响应时间 | <200ms |
-| **P99 Response Time** | 99% 请求的响应时间 | <500ms |
-| **RPS (Requests/sec)** | 每秒请求数 | 越高越好 |
-
-### 4.2 示例输出解读
-
-```
-Type     Name                          # reqs      # fails  |     Avg     Min     Max  Median  |   req/s failures/s
---------|----------------------------|-----------|---------|-------|-------|-------|-------|--------|-----------
-GET      /api/local/videos              1234         0     |      45      12     234      38  |   20.5        0.00
-GET      /api/play/stream/[bvid]         567         3     |     456      89    2345     345  |    9.4        0.05
-POST     /api/system/download/[bvid]     234         0     |      23       8      89      19  |    3.9        0.00
---------|----------------------------|-----------|---------|-------|-------|-------|-------|--------|-----------
-         Aggregated                     2035         3     |     174       8    2345      45  |   33.8        0.05
-```
-
-**解读：**
-- `/api/local/videos`: 1234 次请求，0 次失败，平均 45ms，每秒 20.5 个请求 ✓
-- `/api/play/stream/[bvid]`: 567 次请求，3 次失败（0.5%），平均 456ms ⚠️ 可能需要优化
-- 总体失败率: 3/2035 = 0.15% ✓ 在可接受范围内
-
-## 五、常见问题
-
-### Q1: 运行 `python tests/load_test.py` 没有任何输出
-**A**: Locust 脚本不能直接用 Python 运行，必须使用 `locust` 命令：
-```bash
-locust -f tests/load_test.py --host=http://127.0.0.1:12180
-```
-
-### Q2: 提示 "Connection refused" 或 "无法连接"
-**A**: 后端服务未启动或端口不正确。请检查：
-1. 运行 `python run_backend.py` 启动后端
-2. 确认后端监听在 `127.0.0.1:12180`
-3. 检查防火墙设置
-
-### Q3: 压测时出现大量 500 错误
-**A**: 可能是：
-1. 并发数过高，超出服务器承载能力（降低 `--users` 参数）
-2. 数据库连接池耗尽（检查后端日志）
-3. 内存不足（监控系统资源）
-
-### Q4: 如何停止正在运行的压测？
-**A**: 
-- Web UI 模式：点击 "Stop" 按钮
-- 命令行模式：按 `Ctrl+C`
-
-## 六、性能基准参考
-
-根据 [`docs/Phase3_全链路压测与OOM防御.md`](../docs/Phase3_全链路压测与OOM防御.md) 中的基准：
-
-| API 端点 | 并发用户 | 平均响应时间 | P95 | 吞吐量 (RPS) | 错误率 |
-|---------|---------|------------|-----|------------|--------|
-| GET /api/local/videos | 50 | <100ms | <200ms | >200 | <1% |
-| GET /api/play/stream/[bvid] | 20 | <500ms | <1000ms | >50 | <2% |
-| POST /api/system/download/[bvid] | 10 | <50ms | <100ms | >100 | <1% |
-
-如果你的测试结果显著低于这些基准，可能需要进一步优化。
-
-## 七、进阶技巧
-
-### 7.1 生成 HTML 报告
-```bash
-locust -f tests/load_test.py --host=http://127.0.0.1:12180 \
-  --users 100 --spawn-rate 10 --run-time 60s --headless \
-  --html=report.html
-```
-
-### 7.2 分布式压测（多机）
-在主机上：
-```bash
-locust -f tests/load_test.py --master --host=http://127.0.0.1:12180
-```
-
-在工作机上：
-```bash
-locust -f tests/load_test.py --worker --master-host=<主机IP>
-```
-
-### 7.3 自定义日志级别
-```bash
-locust -f tests/load_test.py --host=http://127.0.0.1:12180 --loglevel DEBUG
-```
-
-## 八、参考资源
-- [Locust 官方文档](https://docs.locust.io/)
-- [性能优化完整方案](../docs/BiliMusic_深度架构解析与极致性能优化方案.md)
-- [压测详细指南](../docs/Phase3_全链路压测与OOM防御.md)
+**最后更新：2026年10月8日**

@@ -7,9 +7,12 @@ import { usePlayerStore } from '../stores/modules/player'
 import { useSettingsStore } from '../stores/modules/settings'
 import { useThemeStore } from '../stores/modules/theme'
 import systemApi from '../api/system'
+// 日志系统接口独立在 api/logs.js 中（initLogStream 为同文件的具名导出）
+import logsApi, { initLogStream } from '../api/logs'
 import themeApi from '../api/theme'
 import UniversalModal from '../components/UniversalModal.vue'
 import AgreementModal from '../components/AgreementModal.vue'
+import { saveAs, copyText } from '../utils/download'
 import {
   TvIcon,
   ArrowDownTrayIcon,
@@ -45,7 +48,19 @@ import {
   ExclamationTriangleIcon,
   PowerIcon,
   InformationCircleIcon,
-  MagnifyingGlassIcon
+  MagnifyingGlassIcon,
+  FolderOpenIcon,
+  PlayIcon,
+  PauseIcon,
+  ClipboardDocumentIcon,
+  FunnelIcon,
+  DocumentArrowDownIcon,
+  ShieldCheckIcon,
+  BugAntIcon,
+  KeyIcon,
+  EyeIcon,
+  EyeSlashIcon,
+  ServerStackIcon
 } from '@heroicons/vue/24/solid'
 
 const store = usePlayerStore()
@@ -65,31 +80,698 @@ const appVersion = __APP_VERSION__
 const systemFonts = ref([])
 const isScanningFonts = ref(false)
 
-const systemLogs = ref([])
-const isFetchingLogs = ref(false)
+// ============================================================
+// 日志系统（实时推送 / 多条件叠加筛选 / 物理日志管理 / 复制下载）
+// ============================================================
 
+const systemLogs = ref([])          // 当前展示的日志（筛选后）
+const logStats = ref({})            // 日志系统状态（内存占用 / 物理文件 / 保留上限）
+const logMeta = ref({})             // 筛选器可选项（级别 / 记录器 / 时间范围）
+const logFiles = ref([])            // 物理日志文件列表
+const isFetchingLogs = ref(false)
+const isDownloadingLogs = ref(false)
+const isOpeningLogDir = ref(false)
+const isLiveTail = ref(false)
+const isLogStreamConnected = ref(false)
+const LIVE_LOG_LIMIT = 3000
+
+// 筛选条件（可任意叠加）
+const logFilter = reactive({
+  keyword: '',
+  exclude: '',
+  hideHeartbeat: true,        // 默认屏蔽心跳噪声，界面清爽
+  heartbeatCategories: ['request', 'login', 'polling'],  // 被屏蔽的心跳类别
+  levels: [],                 // 空数组 = 全部级别
+  loggerContains: '',
+  startTime: '',
+  endTime: ''
+})
+
+// 心跳类别：可分别屏蔽「请求 / 登录验证 / 前端轮询」
+const LOG_HEARTBEAT_CATEGORIES = [
+  { id: 'request', label: 'HTTP 请求', desc: '📡 [请求]、urllib3 等逐条 HTTP 访问日志' },
+  { id: 'login', label: '登录验证', desc: 'B 站导航接口验证、登录验证成功、API 缓存清除' },
+  { id: 'polling', label: '前端轮询', desc: '/download/status、/system/events 等高频轮询' }
+]
+
+// 日志系统运行状态（界面自检用，出现异常时能一眼看出）
+const logStatus = reactive({ lastAction: '', lastError: '', lastTime: '' })
+
+// 物理日志保留策略（与后端同步）
+const logRetention = reactive({ maxFiles: 5, maxFileMB: 5, maxTotalMB: 25 })
+const isSavingRetention = ref(false)
+
+// 后端返回的日志时间形如 "2026-10-08 20:39:08"（本地时间，无时区后缀）。
+// 若直接用 new Date() 解析，部分环境会因缺少时区而出现偏差，
+// 这里手工解析，确保展示时间与系统时间完全一致。
+function formatLogTime(timeStr, ts) {
+  try {
+    if (typeof timeStr === 'string' && timeStr) {
+      const m = timeStr.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/)
+      if (m) {
+        return `${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`
+      }
+      return timeStr
+    }
+    if (typeof ts === 'number') {
+      const d = new Date(ts * 1000)
+      const pad = (n) => String(n).padStart(2, '0')
+      return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+    }
+    return '-'
+  } catch (e) {
+    return String(timeStr || '-')
+  }
+}
+
+function formatBytes(bytes) {
+  const n = Number(bytes) || 0
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(2)} MB`
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+/** 统一提取后端返回的错误说明（用于把失败原因明确告诉用户） */
+function errText(e, fallback = '操作失败') {
+  const detail = e?.response?.data?.detail
+  if (typeof detail === 'string' && detail) return detail
+  if (e?.message) return `${fallback}：${e.message}`
+  return fallback
+}
+
+/** 记录日志面板的操作结果，便于用户与开发者定位问题 */
+function markLogStatus(action, error) {
+  logStatus.lastAction = action
+  logStatus.lastTime = new Date().toLocaleTimeString()
+  logStatus.lastError = error ? String(error) : ''
+  if (error) {
+    console.error(`[日志系统] ${action} 失败:`, error)
+  }
+}
+
+/** 把界面筛选条件转换成后端查询参数 */
+function buildLogParams(extra = {}) {
+  const params = { ...extra }
+  if (logFilter.keyword.trim()) params.keyword = logFilter.keyword.trim()
+  if (logFilter.exclude.trim()) params.exclude = logFilter.exclude.trim()
+  if (logFilter.loggerContains.trim()) params.logger_contains = logFilter.loggerContains.trim()
+  if (logFilter.hideHeartbeat) {
+    const cats = logFilter.heartbeatCategories
+    // 三类全选时用简单开关；部分选择时按类别精确屏蔽
+    if (cats.length >= LOG_HEARTBEAT_CATEGORIES.length) {
+      params.hide_heartbeat = true
+    } else if (cats.length > 0) {
+      params.hide_heartbeat = true
+      params.hide_heartbeat_categories = cats.join(',')
+    }
+  }
+  if (logFilter.levels.length > 0 && logFilter.levels.length < LOG_LEVELS.length) {
+    params.levels = logFilter.levels.join(',')
+  }
+  if (logFilter.startTime) {
+    const t = new Date(logFilter.startTime).getTime()
+    if (!isNaN(t)) params.start_time = t / 1000
+  }
+  if (logFilter.endTime) {
+    const t = new Date(logFilter.endTime).getTime()
+    if (!isNaN(t)) params.end_time = t / 1000
+  }
+  return params
+}
+
+/** 拉取日志（应用当前筛选条件） */
 async function fetchSystemLogs() {
   isFetchingLogs.value = true
   try {
-    const data = await systemApi.getLogs()
-    if (data.logs) {
-      systemLogs.value = data.logs.reverse() // 最新日志在最上面
-    }
+    const data = await logsApi.getLogs(buildLogParams({ limit: 1500, newest_first: true }))
+    systemLogs.value = data.logs || []
+    markLogStatus(`拉取日志（${systemLogs.value.length} 条）`)
   } catch (e) {
-    store.showToast("获取日志失败", "error")
+    markLogStatus('拉取日志', errText(e))
+    store.showToast(errText(e, '获取日志失败'), 'error')
   } finally {
     isFetchingLogs.value = false
   }
 }
 
-function formatLogTime(timeStr) {
+/** 拉取日志系统状态与筛选元数据 */
+async function fetchLogStats() {
   try {
-    const date = new Date(timeStr)
-    return date.toLocaleString()
+    const [stats, meta, files] = await Promise.all([
+      logsApi.getStats(),
+      logsApi.getMeta(),
+      logsApi.getLogFiles()
+    ])
+    logStats.value = stats || {}
+    logMeta.value = meta || {}
+    logFiles.value = files?.files || []
+    if (stats?.max_files) logRetention.maxFiles = stats.max_files
+    if (stats?.max_file_bytes) logRetention.maxFileMB = Math.round(stats.max_file_bytes / 1024 / 1024)
+    if (stats?.max_total_bytes) logRetention.maxTotalMB = Math.round(stats.max_total_bytes / 1024 / 1024)
   } catch (e) {
-    return timeStr
+    // 状态获取失败不阻塞主流程，但要把原因暴露出来
+    markLogStatus('拉取日志状态', errText(e))
   }
 }
+
+/** 一键刷新（状态 + 日志） */
+async function refreshLogs() {
+  await Promise.all([fetchSystemLogs(), fetchLogStats()])
+}
+
+// ---------- 实时日志（SSE，无需手动刷新）----------
+
+let logStream = null
+
+function startLiveLog() {
+  if (logStream) stopLiveLog()
+  const params = buildLogParams()
+  const sseFilters = {
+    hide_heartbeat: params.hide_heartbeat,
+    hide_heartbeat_categories: params.hide_heartbeat_categories,
+    levels: params.levels,
+    keyword: params.keyword,
+    exclude: params.exclude
+  }
+  Object.keys(sseFilters).forEach((k) => {
+    if (sseFilters[k] === undefined || sseFilters[k] === null || sseFilters[k] === '') {
+      delete sseFilters[k]
+    }
+  })
+
+  try {
+    logStream = initLogStream(
+      (record) => {
+        // 实时追加，超出上限时丢弃最旧的记录
+        systemLogs.value.unshift(record)
+        if (systemLogs.value.length > LIVE_LOG_LIMIT) {
+          systemLogs.value.length = LIVE_LOG_LIMIT
+        }
+      },
+      () => {
+        isLogStreamConnected.value = true
+        markLogStatus('实时日志已连接')
+      },
+      sseFilters
+    )
+    logStream.onerror = () => { isLogStreamConnected.value = false }
+    isLiveTail.value = true
+    markLogStatus('正在建立实时日志连接...')
+  } catch (e) {
+    isLiveTail.value = false
+    markLogStatus('启动实时日志', errText(e))
+    store.showToast(errText(e, '启动实时日志失败'), 'error')
+  }
+}
+
+function stopLiveLog() {
+  if (logStream) {
+    try { logStream.close() } catch (e) { /* 忽略 */ }
+    logStream = null
+  }
+  isLogStreamConnected.value = false
+  isLiveTail.value = false
+}
+
+/** 筛选条件变化：实时模式下重连，否则重新拉取 */
+async function onLogFilterChange() {
+  if (isLiveTail.value) {
+    startLiveLog()
+  } else {
+    await fetchSystemLogs()
+  }
+}
+
+function resetLogFilter() {
+  logFilter.keyword = ''
+  logFilter.exclude = ''
+  logFilter.hideHeartbeat = true
+  logFilter.heartbeatCategories = ['request', 'login', 'polling']
+  logFilter.levels = []
+  logFilter.loggerContains = ''
+  logFilter.startTime = ''
+  logFilter.endTime = ''
+  onLogFilterChange()
+}
+
+/**
+ * 日志级别筛选。
+ * 交互约定：点击某个级别 = 「只看这一级」；再次点击同一级别 = 恢复「全部级别」。
+ * （旧实现是纯粹的勾选切换，默认全部勾选的组合下点击无任何视觉变化，容易被误判为“筛选没生效”。）
+ */
+function toggleLogLevel(level) {
+  const isOnlyThis = logFilter.levels.length === 1 && logFilter.levels[0] === level
+  if (isOnlyThis) {
+    logFilter.levels = []
+  } else {
+    logFilter.levels = [level]
+  }
+  onLogFilterChange()
+}
+
+function showAllLogLevels() {
+  logFilter.levels = []
+  onLogFilterChange()
+}
+
+/** 切换某个心跳类别的屏蔽状态 */
+function toggleHeartbeatCategory(id) {
+  logFilter.hideHeartbeat = true
+  const idx = logFilter.heartbeatCategories.indexOf(id)
+  if (idx > -1) logFilter.heartbeatCategories.splice(idx, 1)
+  else logFilter.heartbeatCategories.push(id)
+  onLogFilterChange()
+}
+
+const LOG_LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
+
+const activeFilterCount = computed(() => {
+  let n = 0
+  if (logFilter.keyword.trim()) n++
+  if (logFilter.exclude.trim()) n++
+  if (logFilter.loggerContains.trim()) n++
+  if (logFilter.hideHeartbeat && logFilter.heartbeatCategories.length > 0) n++
+  if (logFilter.levels.length > 0 && logFilter.levels.length < LOG_LEVELS.length) n++
+  if (logFilter.startTime) n++
+  if (logFilter.endTime) n++
+  return n
+})
+
+const logLevelCounts = computed(() => {
+  const counts = {}
+  for (const log of systemLogs.value) {
+    counts[log.level] = (counts[log.level] || 0) + 1
+  }
+  return counts
+})
+
+// ---------- 复制 / 下载 ----------
+
+async function copyAllLogs() {
+  try {
+    const text = await logsApi.exportLogs(buildLogParams({ fmt: 'txt', limit: 100000 }))
+    const payload = typeof text === 'string' ? text : String(text ?? '')
+    if (!payload.trim()) {
+      store.showToast('当前筛选条件下没有可复制的日志', 'info')
+      return
+    }
+    const ok = await copyText(payload)
+    if (ok) {
+      markLogStatus(`已复制 ${payload.split('\n').length} 行日志`)
+      store.showToast('日志已复制到剪贴板', 'success')
+    } else {
+      markLogStatus('复制日志', '剪贴板写入被拒绝')
+      store.showToast('复制失败：剪贴板不可用，请改用「下载」', 'error')
+    }
+  } catch (e) {
+    markLogStatus('复制日志', errText(e))
+    store.showToast(errText(e, '复制日志失败'), 'error')
+  }
+}
+
+async function downloadLogs(fmt = 'txt') {
+  isDownloadingLogs.value = true
+  try {
+    const blob = await logsApi.downloadLogs(buildLogParams({ fmt, limit: 100000 }))
+    const size = blob instanceof Blob ? blob.size : 0
+    if (!size) {
+      markLogStatus('下载日志', '服务端返回空内容')
+      store.showToast('当前筛选条件下没有可下载的日志', 'info')
+      return
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    const filename = `BiliMusic-logs-${stamp}.${fmt}`
+    const result = await saveAs(blob, filename, 'text/plain;charset=utf-8')
+    if (result.saved) {
+      markLogStatus(`已保存日志（${formatBytes(size)}）`)
+      store.showToast(result.path ? `日志已保存到 ${result.path}` : '日志已开始下载', 'success')
+    } else {
+      markLogStatus('下载日志', '本地保存失败')
+      store.showToast('日志下载失败：无法写入本地文件', 'error')
+    }
+  } catch (e) {
+    markLogStatus('下载日志', errText(e))
+    store.showToast(errText(e, '日志下载失败'), 'error')
+  } finally {
+    isDownloadingLogs.value = false
+  }
+}
+
+// ---------- 物理日志管理 ----------
+
+async function openLogDirectory() {
+  isOpeningLogDir.value = true
+  const dir = logStats.value?.log_dir || ''
+  try {
+    // 路径 1：Electron 主进程（最稳妥，不受后端隐藏窗口限制）
+    const ipc = getElectronIpc()
+    if (ipc && dir) {
+      const res = await ipc.invoke('open-directory', dir)
+      if (res && res.ok) {
+        markLogStatus(`已打开日志目录 ${dir}`)
+        store.showToast('已打开日志目录', 'success')
+        return
+      }
+      console.warn('[日志系统] Electron 打开目录失败，回退到后端接口：', res && res.error)
+    }
+
+    // 路径 2：后端接口
+    const res = await logsApi.openLogDir()
+    markLogStatus(`已打开日志目录 ${res.log_dir || dir}`)
+    store.showToast('已打开日志目录', 'success')
+  } catch (e) {
+    const detail = errText(e, '打开日志目录失败')
+    markLogStatus('打开日志目录', detail)
+    if (dir) {
+      await copyText(dir)
+      store.showToast(`${detail}（目录路径已复制到剪贴板：${dir}）`, 'error')
+    } else {
+      store.showToast(detail, 'error')
+    }
+  } finally {
+    isOpeningLogDir.value = false
+  }
+}
+
+async function saveLogRetention() {
+  isSavingRetention.value = true
+  try {
+    const stats = await logsApi.setRetention({
+      max_files: Math.max(1, Number(logRetention.maxFiles) || 5),
+      max_file_mb: Math.max(0.1, Number(logRetention.maxFileMB) || 5),
+      max_total_mb: Math.max(0.5, Number(logRetention.maxTotalMB) || 25)
+    })
+    logStats.value = stats || logStats.value
+    await fetchLogStats()
+    markLogStatus('已保存日志保留策略')
+    store.showToast('日志保留策略已保存并立即生效', 'success')
+  } catch (e) {
+    markLogStatus('保存保留策略', errText(e))
+    store.showToast(errText(e, '保存日志保留策略失败'), 'error')
+  } finally {
+    isSavingRetention.value = false
+  }
+}
+
+async function clearMemoryLogs() {
+  try {
+    await logsApi.clearLogs(true)
+    systemLogs.value = []
+    await fetchLogStats()
+    markLogStatus('已清空内存日志')
+    store.showToast('内存日志已清空（磁盘日志文件保留）', 'success')
+  } catch (e) {
+    markLogStatus('清空日志', errText(e))
+    store.showToast(errText(e, '清空日志失败'), 'error')
+  }
+}
+
+const purgeLogState = reactive({ show: false })
+const isPurgingLogs = ref(false)
+
+async function executePurgeLogFiles() {
+  isPurgingLogs.value = true
+  try {
+    const res = await logsApi.purgeLogFiles(true)
+    purgeLogState.show = false
+    await Promise.all([fetchSystemLogs(), fetchLogStats()])
+    markLogStatus(`已删除 ${res.removed_files} 个日志文件`)
+    store.showToast(`已删除 ${res.removed_files} 个物理日志文件`, 'success')
+  } catch (e) {
+    markLogStatus('删除日志文件', errText(e))
+    store.showToast(errText(e, '删除日志文件失败'), 'error')
+  } finally {
+    isPurgingLogs.value = false
+  }
+}
+
+// ============================================================
+// 调试系统（协议闸门 + 远程调试组件）
+// ============================================================
+
+const debugStatus = ref({ enabled: false, consent: { confirmed: false, checklist: [] } })
+const debugAgreementText = ref('')
+const debugChecklist = ref([])
+const debugChecked = ref([])
+const debugAllowPython = ref(false)
+const debugAllowShell = ref(false)
+const debugToken = ref('')
+const isTokenRevealed = ref(false)
+const isDebugBusy = ref(false)
+const debugAudit = ref([])
+const showDebugAgreement = ref(false)
+const debugLoaded = ref(false)
+const debugTab = ref('console')      // console | audit | api
+const debugConsoleInput = ref('platform.python_version()')
+const debugConsoleOutput = ref('')
+const isDebugConsoleRunning = ref(false)
+const debugCopyState = ref('')
+
+// 控制台常用示例表达式（放在 script 中避免模板引号转义问题）
+const debugSamples = [
+  'platform.python_version()',
+  'sys.getsizeof(sys.modules)',
+  'len(threading.enumerate())',
+  'json.dumps(collections.Counter(["a", "b", "a"]))'
+]
+
+const isElectronEnv = computed(() => {
+  try {
+    return !!(window.require && window.require('process')?.versions?.electron)
+  } catch (e) {
+    return false
+  }
+})
+
+/** 获取 Electron 的 ipcRenderer（非 Electron 环境返回 null） */
+function getElectronIpc() {
+  try {
+    if (!window.require) return null
+    const { ipcRenderer } = window.require('electron')
+    return ipcRenderer && typeof ipcRenderer.invoke === 'function' ? ipcRenderer : null
+  } catch (e) {
+    return null
+  }
+}
+
+const debugAgreementError = ref('')
+
+async function fetchDebugStatus() {
+  try {
+    const data = await systemApi.getDebugStatus(true)
+    debugStatus.value = data || {}
+    if (data?.token) debugToken.value = data.token
+    if (!data?.enabled) debugToken.value = ''
+    debugLoaded.value = true
+  } catch (e) {
+    debugLoaded.value = false
+    debugAgreementError.value = errText(e, '无法读取调试系统状态')
+    console.error('[调试系统] 读取状态失败:', e)
+  }
+}
+
+async function loadDebugAgreement() {
+  debugAgreementError.value = ''
+  try {
+    const data = await systemApi.getDebugAgreement()
+    debugAgreementText.value = data.agreement || ''
+    debugChecklist.value = data.checklist || []
+    // 每次都要求重新逐项勾选：协议闸门的意义在于「本次主动确认」，
+    // 而不是复用上一次的勾选状态。
+    debugChecked.value = []
+    if (!debugAgreementText.value) {
+      debugAgreementError.value = '后端返回的协议内容为空，请检查后端版本是否为 v1.0.21 及以上'
+    }
+  } catch (e) {
+    debugAgreementError.value = errText(e, '获取调试协议失败')
+    console.error('[调试系统] 获取协议失败:', e)
+    store.showToast(debugAgreementError.value, 'error')
+  }
+}
+
+function openDebugAgreement() {
+  showDebugAgreement.value = true
+  // 每次都重新拉取，避免拿到过期内容
+  loadDebugAgreement()
+}
+
+function toggleDebugCheck(id) {
+  const idx = debugChecked.value.indexOf(id)
+  if (idx > -1) debugChecked.value.splice(idx, 1)
+  else debugChecked.value.push(id)
+}
+
+const debugAllChecked = computed(() =>
+  debugChecklist.value.length > 0 &&
+  debugChecklist.value.every(i => debugChecked.value.includes(i.id)))
+
+async function handleEnableDebug() {
+  if (!debugAllChecked.value) {
+    store.showToast('请先逐项确认协议中的所有条款', 'error')
+    return
+  }
+  isDebugBusy.value = true
+  try {
+    await systemApi.acceptDebugConsent(debugChecked.value)
+    const res = await systemApi.enableDebug(debugAllowPython.value, debugAllowShell.value)
+    debugToken.value = res.token || ''
+    showDebugAgreement.value = false
+    isTokenRevealed.value = true
+    await fetchDebugStatus()
+    store.showToast('调试模式已开启，请妥善保管访问令牌', 'success')
+  } catch (e) {
+    store.showToast(e.response?.data?.detail || '开启调试模式失败', 'error')
+  } finally {
+    isDebugBusy.value = false
+  }
+}
+
+async function handleDisableDebug() {
+  isDebugBusy.value = true
+  try {
+    await systemApi.disableDebug('用户在设置中关闭')
+    debugToken.value = ''
+    isTokenRevealed.value = false
+    await fetchDebugStatus()
+    store.showToast('调试模式已关闭，访问令牌已销毁', 'success')
+  } catch (e) {
+    store.showToast('关闭调试模式失败', 'error')
+  } finally {
+    isDebugBusy.value = false
+  }
+}
+
+async function handleRotateDebugToken() {
+  try {
+    const res = await systemApi.rotateDebugToken()
+    debugToken.value = res.token || ''
+    isTokenRevealed.value = true
+    store.showToast('访问令牌已轮换', 'success')
+  } catch (e) {
+    store.showToast('轮换令牌失败', 'error')
+  }
+}
+
+async function handleRevokeDebugConsent() {
+  try {
+    await systemApi.revokeDebugConsent()
+    debugChecked.value = []
+    debugToken.value = ''
+    await fetchDebugStatus()
+    store.showToast('已撤回协议确认', 'success')
+  } catch (e) {
+    store.showToast('撤回失败', 'error')
+  }
+}
+
+async function copyDebugValue(text, label) {
+  const ok = await copyText(text)
+  if (ok) {
+    debugCopyState.value = label
+    setTimeout(() => { debugCopyState.value = '' }, 1500)
+  }
+  store.showToast(ok ? `${label} 已复制` : '复制失败', ok ? 'success' : 'error')
+}
+
+const curlExample = computed(() => {
+  const token = debugToken.value || '<你的访问令牌>'
+  return [
+    `# 1. 连通性与能力探测`,
+    `curl -H "X-Debug-Token: ${token}" http://127.0.0.1:12180/api/debug/ping`,
+    ``,
+    `# 2. 运行场景快照`,
+    `curl -H "X-Debug-Token: ${token}" http://127.0.0.1:12180/api/debug/scene`,
+    ``,
+    `# 3. 读取最近错误日志`,
+    `curl -H "X-Debug-Token: ${token}" "http://127.0.0.1:12180/api/debug/logs?levels=ERROR&limit=50"`,
+    ``,
+    `# 4. 执行受限表达式`,
+    `curl -X POST -H "X-Debug-Token: ${token}" -H "Content-Type: application/json" \\`,
+    `  -d '{"action":"python","payload":{"expression":"platform.python_version()"}}' \\`,
+    `  http://127.0.0.1:12180/api/debug/action`,
+    ``,
+    `# 5. 只读 SQL 查询`,
+    `curl -X POST -H "X-Debug-Token: ${token}" -H "Content-Type: application/json" \\`,
+    `  -d '{"action":"db_query","payload":{"sql":"SELECT bvid, download_status FROM videos LIMIT 10"}}' \\`,
+    `  http://127.0.0.1:12180/api/debug/action`
+  ].join('\n')
+})
+
+async function runDebugConsole() {
+  if (!debugToken.value) {
+    store.showToast('请先开启调试模式以获取访问令牌', 'error')
+    return
+  }
+  isDebugConsoleRunning.value = true
+  debugConsoleOutput.value = ''
+  try {
+    const res = await systemApi.debugAction(debugToken.value, 'python', {
+      expression: debugConsoleInput.value
+    })
+    debugConsoleOutput.value = JSON.stringify(res.result, null, 2)
+  } catch (e) {
+    const detail = errText(e, '执行失败')
+    debugConsoleOutput.value = `执行失败：${detail}`
+    // 令牌失效时同步一次调试状态，避免界面显示「已开启」但实际已不可用
+    if (e?.response?.status === 403) {
+      await fetchDebugStatus()
+      debugConsoleOutput.value += (debugStatus.value?.enabled
+        ? '\n\n提示：令牌无效，可点击「轮换令牌」获取新令牌。'
+        : '\n\n提示：调试模式已关闭，请重新开启。')
+    }
+  } finally {
+    isDebugConsoleRunning.value = false
+  }
+}
+
+const isDebugAuditLoading = ref(false)
+const debugAuditError = ref('')
+
+async function fetchDebugAudit() {
+  debugAuditError.value = ''
+  if (!debugToken.value) {
+    debugAuditError.value = '当前没有可用的调试令牌，请先关闭并重新开启调试模式'
+    return
+  }
+  isDebugAuditLoading.value = true
+  try {
+    // [修复] 该接口在后端受 require_debug_token 保护，必须携带令牌，
+    // 否则后端会记录 auth_failed 并返回 403「令牌校验失败」
+    const res = await systemApi.getDebugAudit(debugToken.value, 100)
+    debugAudit.value = res.audit || []
+  } catch (e) {
+    debugAuditError.value = errText(e, '读取审计日志失败')
+    // 令牌失效（被轮换 / 调试已关闭）时同步一次状态，避免界面显示与实际不符
+    if (e?.response?.status === 403) {
+      await fetchDebugStatus()
+      if (!debugStatus.value?.enabled) {
+        debugAuditError.value = '调试模式已关闭，审计日志不可读取'
+      }
+    }
+  } finally {
+    isDebugAuditLoading.value = false
+  }
+}
+
+async function clearDebugAuditLog() {
+  if (!debugToken.value) {
+    store.showToast('当前没有可用的调试令牌', 'error')
+    return
+  }
+  try {
+    await systemApi.clearDebugAudit(debugToken.value)
+    debugAudit.value = []
+    debugAuditError.value = ''
+    store.showToast('审计日志已清空', 'success')
+  } catch (e) {
+    store.showToast(errText(e, '清空审计日志失败'), 'error')
+  }
+}
+
+watch(debugTab, (tab) => {
+  if (tab === 'audit') fetchDebugAudit()
+})
 
 // 搜索功能
 const searchQuery = ref('')
@@ -112,7 +794,8 @@ const navItems = [
   { name: '算法实验室', id: 'section-algorithm', icon: ScaleIcon, keywords: ['算法', '播放', '模式', 'algorithm', 'mode'] },
   { name: '基础音量', id: 'section-volume', icon: SpeakerWaveIcon, keywords: ['音量', '声音', '音频', 'volume', 'sound'] },
   { name: '数据同步', id: 'section-sync', icon: CircleStackIcon, keywords: ['同步', '备份', '数据', 'sync', 'backup'] },
-  { name: '系统日志', id: 'section-logs', icon: CommandLineIcon, keywords: ['日志', '控制台', '错误', 'log', 'console', 'error'] },
+  { name: '系统日志', id: 'section-logs', icon: CommandLineIcon, keywords: ['日志', '控制台', '错误', 'log', 'console', 'error', '筛选', '实时'] },
+  { name: '调试系统', id: 'section-debug', icon: BugAntIcon, keywords: ['调试', '开发', 'debug', '远程', 'token', '令牌', 'vibe', 'api'] },
   { name: '关于软件', id: 'section-about', icon: InformationCircleIcon, keywords: ['关于', '版本', '信息', 'about', 'version'] }
 ]
 
@@ -309,6 +992,16 @@ function selectThemeColor(c) {
 const closeAll = () => { openDropdown.value = null }
 onMounted(() => window.addEventListener('click', closeAll))
 onUnmounted(() => window.removeEventListener('click', closeAll))
+
+// 日志系统与调试系统的初始化 / 资源释放
+onMounted(async () => {
+  await refreshLogs()
+  fetchDebugStatus()
+})
+
+onUnmounted(() => {
+  stopLiveLog()
+})
 
 const editThemeData = reactive({ name: '', cardImage: '', cardImageSize: 50, cardOffsetX: -10, cardOffsetY: 10 })
 
@@ -1079,14 +1772,14 @@ async function executeFactoryReset() {
                  <div class="h-8 w-px bg-gray-200 dark:bg-white/10 mx-2 hidden sm:block"></div>
                  <div class="animate-fade-in flex flex-wrap items-center gap-6">
                    <div class="flex items-center gap-3">
-                     <span class="text-[10px] font-bold text-gray-400 uppercase leading-tight">全局主题<br>频谱底部</span>
+                     <span class="text-[10px] font-bold text-gray-400 uppercase leading-tight">全局主题<br />频谱底部</span>
                      <div class="relative w-10 h-10 rounded-full overflow-hidden border-2 border-white dark:border-gray-600 shadow-sm cursor-pointer hover:scale-110 transition-transform">
                        <input type="color" :value="settingsStore.settings.visColorCustom" @input="(e) => { settingsStore.updateSettings({visColorCustom: e.target.value}); themeStore.updateThemeColor(e.target.value); }" class="absolute -top-1/2 -left-1/2 w-[200%] h-[200%] p-0 m-0 cursor-pointer" />
                      </div>
                    </div>
                    <ArrowsRightLeftIcon class="w-4 h-4 text-gray-300 hidden sm:block" />
                    <div class="flex items-center gap-3">
-                     <span class="text-[10px] font-bold text-gray-400 uppercase leading-tight">频谱顶部<br>辅助色</span>
+                     <span class="text-[10px] font-bold text-gray-400 uppercase leading-tight">频谱顶部<br />辅助色</span>
                      <div class="relative w-10 h-10 rounded-full overflow-hidden border-2 border-white dark:border-gray-600 shadow-sm cursor-pointer hover:scale-110 transition-transform">
                        <input type="color" :value="settingsStore.settings.visColorCustomSec || '#a855f7'" @input="(e) => settingsStore.updateSettings({visColorCustomSec: e.target.value})" class="absolute -top-1/2 -left-1/2 w-[200%] h-[200%] p-0 m-0 cursor-pointer" />
                      </div>
@@ -1836,39 +2529,608 @@ async function executeFactoryReset() {
 
       <!-- 13. 系统日志 -->
       <section id="section-logs" class="bg-white/50 dark:bg-gray-900/40 backdrop-blur-md rounded-[2.5rem] p-8 border border-gray-100 dark:border-white/5 shadow-sm">
-        <div class="flex items-center justify-between mb-8">
+        <!-- 标题栏 -->
+        <div class="flex flex-wrap items-center justify-between gap-4 mb-6">
           <div class="flex items-center gap-5">
             <div class="p-4 bg-gray-500/10 text-gray-500 rounded-[1.5rem]"><CommandLineIcon class="w-7 h-7" /></div>
             <div>
-              <h3 class="text-xl font-bold text-gray-800 dark:text-white">系统日志</h3>
-              <p class="text-sm text-gray-400 mt-1">查看软件运行时的后台日志信息</p>
+              <h3 class="text-xl font-bold text-gray-800 dark:text-white flex items-center gap-3">
+                系统日志
+                <span v-if="isLiveTail"
+                      class="px-2 py-0.5 rounded-lg text-[10px] font-black flex items-center gap-1"
+                      :class="isLogStreamConnected ? 'bg-emerald-500/15 text-emerald-500' : 'bg-amber-500/15 text-amber-500'">
+                  <span class="w-1.5 h-1.5 rounded-full animate-pulse"
+                        :class="isLogStreamConnected ? 'bg-emerald-500' : 'bg-amber-500'"></span>
+                  {{ isLogStreamConnected ? '实时连接中' : '连接中...' }}
+                </span>
+              </h3>
+              <p class="text-sm text-gray-400 mt-1">
+                实时日志 · 多条件筛选 · 物理日志管理
+                <span v-if="logStats.time" class="ml-2 font-mono text-[11px] text-gray-400">
+                  服务端时间 {{ logStats.time }}
+                </span>
+              </p>
             </div>
           </div>
-          <button @click="fetchSystemLogs" :disabled="isFetchingLogs" class="px-4 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-xl text-xs font-bold transition shadow-md shadow-gray-500/30 active:scale-95 flex items-center gap-2 disabled:opacity-50">
-            <ArrowPathIcon v-if="isFetchingLogs" class="w-4 h-4 animate-spin" />
-            <ArrowPathIcon v-else class="w-4 h-4" />
-            刷新日志
-          </button>
+          <div class="flex flex-wrap items-center gap-2">
+            <button @click="isLiveTail ? stopLiveLog() : startLiveLog()"
+                    class="px-3.5 py-2 rounded-xl text-xs font-bold transition shadow-md active:scale-95 flex items-center gap-2"
+                    :class="isLiveTail
+                      ? 'bg-amber-500 hover:bg-amber-600 text-white shadow-amber-500/30'
+                      : 'bg-emerald-500 hover:bg-emerald-600 text-white shadow-emerald-500/30'">
+              <component :is="isLiveTail ? PauseIcon : PlayIcon" class="w-4 h-4" />
+              {{ isLiveTail ? '暂停实时' : '实时日志' }}
+            </button>
+            <button @click="refreshLogs" :disabled="isFetchingLogs"
+                    class="px-3.5 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-xl text-xs font-bold transition shadow-md shadow-gray-500/30 active:scale-95 flex items-center gap-2 disabled:opacity-50">
+              <ArrowPathIcon class="w-4 h-4" :class="{ 'animate-spin': isFetchingLogs }" />
+              刷新
+            </button>
+          </div>
         </div>
 
-        <div class="bg-gray-900 rounded-2xl p-4 overflow-hidden flex flex-col h-[400px]">
-          <div v-if="systemLogs.length === 0" class="flex-1 flex items-center justify-center text-gray-500 text-sm font-bold">
-            暂无日志数据，请点击刷新
+        <!-- 日志统计 -->
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+          <div class="p-3.5 rounded-2xl bg-gray-50/70 dark:bg-white/5 border border-gray-100 dark:border-white/5">
+            <div class="text-[10px] font-black text-gray-400 uppercase tracking-widest">内存日志</div>
+            <div class="text-sm font-black text-gray-700 dark:text-gray-200 mt-1">
+              {{ logStats.memory_count ?? 0 }} <span class="text-[10px] text-gray-400">/ {{ logStats.memory_capacity ?? 0 }}</span>
+            </div>
           </div>
-          <div v-else class="flex-1 overflow-y-auto scrollbar-thin font-mono text-xs space-y-1 pr-2">
-            <div v-for="(log, idx) in systemLogs" :key="idx" class="flex gap-3 hover:bg-white/5 px-2 py-1 rounded">
-              <span class="text-gray-500 shrink-0">[{{ formatLogTime(log.time) }}]</span>
-              <span class="shrink-0 w-12" :class="{
+          <div class="p-3.5 rounded-2xl bg-gray-50/70 dark:bg-white/5 border border-gray-100 dark:border-white/5">
+            <div class="text-[10px] font-black text-gray-400 uppercase tracking-widest">磁盘占用</div>
+            <div class="text-sm font-black text-gray-700 dark:text-gray-200 mt-1">
+              {{ formatBytes(logStats.total_bytes) }}
+              <span class="text-[10px] text-gray-400">/ {{ formatBytes(logStats.max_total_bytes) }}</span>
+            </div>
+          </div>
+          <div class="p-3.5 rounded-2xl bg-gray-50/70 dark:bg-white/5 border border-gray-100 dark:border-white/5">
+            <div class="text-[10px] font-black text-gray-400 uppercase tracking-widest">日志文件</div>
+            <div class="text-sm font-black text-gray-700 dark:text-gray-200 mt-1">
+              {{ logStats.file_count ?? 0 }} <span class="text-[10px] text-gray-400">/ {{ logStats.max_files ?? 0 }} 个</span>
+            </div>
+          </div>
+          <div class="p-3.5 rounded-2xl bg-gray-50/70 dark:bg-white/5 border border-gray-100 dark:border-white/5">
+            <div class="text-[10px] font-black text-gray-400 uppercase tracking-widest">当前筛选</div>
+            <div class="text-sm font-black text-gray-700 dark:text-gray-200 mt-1">
+              {{ systemLogs.length }} 条
+              <span v-if="activeFilterCount > 0" class="text-[10px] text-primary-500">· {{ activeFilterCount }} 项条件</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 操作状态栏：任一步骤失败都会在这里明确显示原因 -->
+        <div v-if="logStatus.lastTime"
+             class="mb-4 px-4 py-2.5 rounded-2xl text-[11px] font-bold flex flex-wrap items-center gap-x-3 gap-y-1 border"
+             :class="logStatus.lastError
+               ? 'bg-red-50 dark:bg-red-500/10 border-red-200 dark:border-red-500/20 text-red-600 dark:text-red-400'
+               : 'bg-emerald-50/70 dark:bg-emerald-500/5 border-emerald-100 dark:border-emerald-500/10 text-emerald-700 dark:text-emerald-400'">
+          <span>{{ logStatus.lastError ? '✕' : '✓' }}</span>
+          <span>{{ logStatus.lastAction || '就绪' }}</span>
+          <span v-if="logStatus.lastError" class="font-mono break-all">{{ logStatus.lastError }}</span>
+          <span class="ml-auto text-gray-400 font-mono">{{ logStatus.lastTime }}</span>
+        </div>
+
+        <!-- 筛选器 -->
+        <div class="p-5 rounded-[2rem] bg-gray-50/60 dark:bg-white/5 border border-gray-100 dark:border-white/5 mb-4 space-y-4">
+          <div class="flex items-center gap-2">
+            <FunnelIcon class="w-4 h-4 text-primary-500" />
+            <span class="text-xs font-black text-gray-700 dark:text-gray-200 tracking-wide">日志筛选（各条件可叠加）</span>
+            <button @click="resetLogFilter"
+                    class="ml-auto text-[10px] font-black text-gray-400 hover:text-primary-500 transition">重置全部条件</button>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <label class="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">包含关键字（用 | 分隔多个）</label>
+              <input v-model="logFilter.keyword" @keyup.enter="onLogFilterChange" @change="onLogFilterChange"
+                     placeholder="例如：下载失败|Errno"
+                     class="mt-1 w-full bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 rounded-xl px-3 py-2 text-xs font-bold text-gray-800 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500" />
+            </div>
+            <div>
+              <label class="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">屏蔽关键字（用 | 分隔多个）</label>
+              <input v-model="logFilter.exclude" @keyup.enter="onLogFilterChange" @change="onLogFilterChange"
+                     placeholder="例如：请求|轮询"
+                     class="mt-1 w-full bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 rounded-xl px-3 py-2 text-xs font-bold text-gray-800 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500" />
+            </div>
+            <div>
+              <label class="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">模块名包含</label>
+              <input v-model="logFilter.loggerContains" @keyup.enter="onLogFilterChange" @change="onLogFilterChange"
+                     placeholder="例如：download_service"
+                     class="mt-1 w-full bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 rounded-xl px-3 py-2 text-xs font-bold text-gray-800 dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500" />
+            </div>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="text-[10px] font-black text-gray-400 uppercase tracking-widest">日志级别</span>
+            <button @click="showAllLogLevels()"
+                    class="px-3 py-1.5 rounded-xl text-[10px] font-black transition border"
+                    :class="logFilter.levels.length === 0
+                      ? 'bg-primary-500 text-white border-primary-500 shadow-md shadow-primary-500/20'
+                      : 'bg-white dark:bg-black/20 text-gray-400 border-gray-200 dark:border-white/10 hover:border-primary-300'">
+              全部
+            </button>
+            <button v-for="level in LOG_LEVELS" :key="level"
+                    @click="toggleLogLevel(level)"
+                    class="px-3 py-1.5 rounded-xl text-[10px] font-black transition border"
+                    :class="logFilter.levels.includes(level)
+                      ? 'bg-primary-500 text-white border-primary-500 shadow-md shadow-primary-500/20'
+                      : 'bg-white dark:bg-black/20 text-gray-400 border-gray-200 dark:border-white/10 hover:border-primary-300'">
+              {{ level }}
+              <span class="opacity-70">({{ logLevelCounts[level] || 0 }})</span>
+            </button>
+            <span class="text-[10px] text-gray-400 italic">点击单个级别 = 只看这一级；再点一次 = 恢复全部</span>
+          </div>
+
+          <!-- 心跳/噪声日志屏蔽（分类可分别开关） -->
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="text-[10px] font-black text-gray-400 uppercase tracking-widest">心跳日志屏蔽</span>
+            <button v-for="cat in LOG_HEARTBEAT_CATEGORIES" :key="cat.id"
+                    @click="toggleHeartbeatCategory(cat.id)"
+                    :title="cat.desc"
+                    class="px-3 py-1.5 rounded-xl text-[10px] font-black transition border flex items-center gap-1.5"
+                    :class="logFilter.hideHeartbeat && logFilter.heartbeatCategories.includes(cat.id)
+                      ? 'bg-emerald-500 text-white border-emerald-500'
+                      : 'bg-white dark:bg-black/20 text-gray-400 border-gray-200 dark:border-white/10 hover:border-emerald-300'">
+              <component :is="logFilter.hideHeartbeat && logFilter.heartbeatCategories.includes(cat.id) ? EyeSlashIcon : EyeIcon" class="w-3.5 h-3.5" />
+              {{ cat.label }}
+              <span class="opacity-70">({{ (logMeta.heartbeat_categories || {})[cat.id] || 0 }})</span>
+            </button>
+            <span class="text-[10px] text-gray-400 italic">
+              登录验证噪声（导航接口校验、登录成功、API 缓存清除）已归入「登录验证」，可单独屏蔽
+            </span>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="text-[10px] font-black text-gray-400 uppercase tracking-widest">时间区间</span>
+            <input type="datetime-local" v-model="logFilter.startTime" @change="onLogFilterChange"
+                   class="bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 rounded-xl px-3 py-2 text-xs font-bold text-gray-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary-500" />
+            <span class="text-xs text-gray-400 font-bold">至</span>
+            <input type="datetime-local" v-model="logFilter.endTime" @change="onLogFilterChange"
+                   class="bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 rounded-xl px-3 py-2 text-xs font-bold text-gray-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary-500" />
+            <span class="text-[10px] text-gray-400 italic">留空表示不限</span>
+          </div>
+        </div>
+
+        <!-- 日志内容 -->
+        <div class="bg-gray-900 rounded-2xl overflow-hidden flex flex-col h-[420px]">
+          <div class="px-4 py-2.5 border-b border-white/10 flex items-center gap-3 shrink-0">
+            <span class="text-[10px] font-black text-gray-400 uppercase tracking-widest">日志输出</span>
+            <span class="text-[10px] text-gray-500">
+              最新在上 · 共 {{ systemLogs.length }} 条
+            </span>
+            <div class="ml-auto flex items-center gap-2">
+              <button @click="copyAllLogs"
+                      class="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white text-[10px] font-black transition flex items-center gap-1.5">
+                <ClipboardDocumentIcon class="w-3.5 h-3.5" /> 一键复制
+              </button>
+              <button @click="downloadLogs('txt')" :disabled="isDownloadingLogs"
+                      class="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white text-[10px] font-black transition flex items-center gap-1.5 disabled:opacity-50">
+                <DocumentArrowDownIcon class="w-3.5 h-3.5" :class="{ 'animate-bounce': isDownloadingLogs }" /> 下载 TXT
+              </button>
+              <button @click="downloadLogs('json')" :disabled="isDownloadingLogs"
+                      class="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white text-[10px] font-black transition flex items-center gap-1.5 disabled:opacity-50">
+                <DocumentArrowDownIcon class="w-3.5 h-3.5" /> JSON
+              </button>
+              <button @click="clearMemoryLogs"
+                      class="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-red-500/60 text-white text-[10px] font-black transition flex items-center gap-1.5">
+                <TrashIcon class="w-3.5 h-3.5" /> 清屏
+              </button>
+            </div>
+          </div>
+
+          <div v-if="systemLogs.length === 0" class="flex-1 flex items-center justify-center text-gray-500 text-sm font-bold">
+            {{ isFetchingLogs ? '正在加载日志...' : '当前筛选条件下没有日志' }}
+          </div>
+          <div v-else ref="logViewport" class="flex-1 overflow-y-auto scrollbar-thin font-mono text-[11px] py-2">
+            <div v-for="(log, idx) in systemLogs" :key="log.seq || idx"
+                 class="flex gap-3 px-4 py-1 hover:bg-white/5">
+              <span class="text-gray-500 shrink-0 tabular-nums">{{ formatLogTime(log.time, log.ts) }}</span>
+              <span class="shrink-0 w-[68px] font-black" :class="{
                 'text-red-400': log.level === 'ERROR' || log.level === 'CRITICAL',
-                'text-yellow-400': log.level === 'WARNING',
+                'text-amber-400': log.level === 'WARNING',
                 'text-blue-400': log.level === 'INFO',
-                'text-gray-400': log.level === 'DEBUG'
+                'text-gray-500': log.level === 'DEBUG'
               }">{{ log.level }}</span>
-              <span class="text-gray-300 break-all">{{ log.message }}</span>
+              <span class="text-gray-300 break-all whitespace-pre-wrap flex-1">{{ log.message }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 物理日志管理 -->
+        <div class="mt-5 p-5 rounded-[2rem] bg-gray-50/60 dark:bg-white/5 border border-gray-100 dark:border-white/5 space-y-4">
+          <div class="flex flex-wrap items-center gap-3">
+            <ServerStackIcon class="w-4 h-4 text-cyan-500" />
+            <span class="text-xs font-black text-gray-700 dark:text-gray-200 tracking-wide">物理日志管理</span>
+            <span class="text-[10px] font-mono text-gray-400 break-all">{{ logStats.log_dir || '（未初始化）' }}</span>
+            <div class="ml-auto flex flex-wrap items-center gap-2">
+              <button @click="openLogDirectory" :disabled="isOpeningLogDir"
+                      class="px-3.5 py-2 bg-cyan-500 hover:bg-cyan-600 text-white rounded-xl text-xs font-bold transition shadow-md shadow-cyan-500/30 active:scale-95 flex items-center gap-2 disabled:opacity-50">
+                <FolderOpenIcon class="w-4 h-4" />
+                打开日志目录
+              </button>
+              <button @click="purgeLogState.show = true"
+                      class="px-3.5 py-2 bg-white dark:bg-black/20 border border-red-200 dark:border-red-500/20 text-red-500 rounded-xl text-xs font-bold transition active:scale-95 flex items-center gap-2">
+                <TrashIcon class="w-4 h-4" /> 删除全部日志文件
+              </button>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <label class="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">文件数量上限</label>
+              <input type="number" min="1" max="200" v-model.number="logRetention.maxFiles"
+                     class="mt-1 w-full bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 rounded-xl px-3 py-2 text-xs font-bold text-gray-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-cyan-500" />
+              <p class="text-[10px] text-gray-400 mt-1 ml-1">超出后自动删除最旧的文件</p>
+            </div>
+            <div>
+              <label class="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">单文件体积上限 (MB)</label>
+              <input type="number" min="0.1" max="1024" step="0.5" v-model.number="logRetention.maxFileMB"
+                     class="mt-1 w-full bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 rounded-xl px-3 py-2 text-xs font-bold text-gray-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-cyan-500" />
+              <p class="text-[10px] text-gray-400 mt-1 ml-1">写满后自动轮转为归档文件</p>
+            </div>
+            <div>
+              <label class="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">日志总占用上限 (MB)</label>
+              <input type="number" min="0.5" max="10240" step="1" v-model.number="logRetention.maxTotalMB"
+                     class="mt-1 w-full bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 rounded-xl px-3 py-2 text-xs font-bold text-gray-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-cyan-500" />
+              <p class="text-[10px] text-gray-400 mt-1 ml-1">超出后按最旧优先回收</p>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-3">
+            <button @click="saveLogRetention" :disabled="isSavingRetention"
+                    class="px-4 py-2 bg-gray-800 dark:bg-white text-white dark:text-black rounded-xl text-xs font-black transition active:scale-95 flex items-center gap-2 disabled:opacity-50">
+              <ArrowPathIcon class="w-4 h-4" :class="{ 'animate-spin': isSavingRetention }" />
+              保存保留策略
+            </button>
+            <span class="text-[10px] text-gray-400">保存后立即回收超限文件，无需重启</span>
+          </div>
+
+          <div v-if="logFiles.length > 0" class="space-y-1.5 pt-1">
+            <div v-for="file in logFiles" :key="file.name"
+                 class="flex items-center gap-3 px-3 py-2 rounded-xl bg-white/70 dark:bg-black/20 border border-gray-100 dark:border-white/5">
+              <span class="text-[11px] font-mono font-bold text-gray-600 dark:text-gray-300 break-all">{{ file.name }}</span>
+              <span v-if="file.is_active"
+                    class="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-500 text-[9px] font-black shrink-0">写入中</span>
+              <span class="ml-auto text-[10px] font-mono text-gray-400 shrink-0">{{ formatBytes(file.size) }}</span>
+              <span class="text-[10px] font-mono text-gray-400 shrink-0 hidden sm:inline">{{ file.modified }}</span>
             </div>
           </div>
         </div>
       </section>
+
+      <!-- 14. 调试系统 -->
+      <section id="section-debug" class="bg-white/50 dark:bg-gray-900/40 backdrop-blur-md rounded-[2.5rem] p-8 border border-gray-100 dark:border-white/5 shadow-sm">
+        <div class="flex flex-wrap items-center justify-between gap-4 mb-6">
+          <div class="flex items-center gap-5">
+            <div class="p-4 rounded-[1.5rem]"
+                 :class="debugStatus.enabled ? 'bg-purple-500/10 text-purple-500' : 'bg-gray-500/10 text-gray-500'">
+              <BugAntIcon class="w-7 h-7" />
+            </div>
+            <div>
+              <h3 class="text-xl font-bold text-gray-800 dark:text-white flex items-center gap-3">
+                调试系统
+                <span class="px-2 py-0.5 rounded-lg text-[10px] font-black"
+                      :class="debugStatus.enabled ? 'bg-purple-500/15 text-purple-500' : 'bg-gray-500/15 text-gray-400'">
+                  {{ debugStatus.enabled ? '已开启' : '未开启' }}
+                </span>
+              </h3>
+              <p class="text-sm text-gray-400 mt-1">面向开发者与 Vibe Coding 的远程调试组件（需先阅读并确认协议）</p>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <button v-if="!debugStatus.enabled" @click="openDebugAgreement"
+                    class="px-4 py-2.5 bg-purple-500 hover:bg-purple-600 text-white rounded-xl text-xs font-black transition shadow-md shadow-purple-500/30 active:scale-95 flex items-center gap-2">
+              <ShieldCheckIcon class="w-4 h-4" /> 阅读协议并开启
+            </button>
+            <template v-else>
+              <button @click="handleRotateDebugToken"
+                      class="px-3.5 py-2.5 bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 text-gray-600 dark:text-gray-300 rounded-xl text-xs font-black transition active:scale-95 flex items-center gap-2">
+                <ArrowPathIcon class="w-4 h-4" /> 轮换令牌
+              </button>
+              <button @click="handleDisableDebug" :disabled="isDebugBusy"
+                      class="px-4 py-2.5 bg-red-500 hover:bg-red-600 text-white rounded-xl text-xs font-black transition shadow-md shadow-red-500/30 active:scale-95 flex items-center gap-2 disabled:opacity-50">
+                <PowerIcon class="w-4 h-4" /> 关闭调试模式
+              </button>
+            </template>
+          </div>
+        </div>
+
+        <!-- 未开启时的说明 -->
+        <div v-if="!debugStatus.enabled" class="p-6 rounded-[2rem] bg-amber-50/60 dark:bg-amber-500/5 border border-amber-100 dark:border-amber-500/10 space-y-3">
+          <div class="flex items-start gap-3">
+            <ExclamationTriangleIcon class="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+            <div class="text-xs leading-relaxed text-gray-600 dark:text-gray-300 space-y-2">
+              <p><b class="text-amber-600 dark:text-amber-400">开启调试模式前请务必知悉：</b></p>
+              <ul class="list-disc ml-4 space-y-1">
+                <li>调试模式会在本机开放一组调试接口，可读取运行状态、日志并执行受限指令；</li>
+                <li>持有访问令牌的任何程序都可以调用这些接口，存在本机数据暴露与数据损坏风险；</li>
+                <li>由此产生的一切后果由使用者本人承担，<b>开发者不承担连带或赔偿责任</b>；</li>
+                <li>调试系统<b>不会上传任何数据</b>，审计记录仅保存在你的本机。</li>
+              </ul>
+            </div>
+          </div>
+          <button @click="openDebugAgreement"
+                  class="w-full py-3 bg-purple-500 hover:bg-purple-600 text-white rounded-2xl font-black text-xs shadow-lg shadow-purple-500/30 transition active:scale-95">
+            阅读《调试模式使用协议 / 风险说明书 / 责任划分书》
+          </button>
+        </div>
+
+        <!-- 已开启时的控制台 -->
+        <div v-else class="space-y-4">
+          <!-- 访问令牌 -->
+          <div class="p-5 rounded-[2rem] bg-gray-50/70 dark:bg-white/5 border border-gray-100 dark:border-white/5 space-y-3">
+            <div class="flex items-center gap-2">
+              <KeyIcon class="w-4 h-4 text-purple-500" />
+              <span class="text-xs font-black text-gray-700 dark:text-gray-200">访问令牌</span>
+              <span class="text-[10px] text-gray-400">（所有调试接口都需要请求头 X-Debug-Token）</span>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <code class="flex-1 min-w-[240px] px-3 py-2.5 rounded-xl bg-gray-900 text-emerald-400 text-[11px] font-mono break-all">
+                {{ isTokenRevealed ? debugToken : '•'.repeat(Math.min(48, debugToken.length || 48)) }}
+              </code>
+              <button @click="isTokenRevealed = !isTokenRevealed"
+                      class="px-3 py-2.5 rounded-xl bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 text-gray-600 dark:text-gray-300 text-[11px] font-black transition active:scale-95 flex items-center gap-1.5">
+                <component :is="isTokenRevealed ? EyeSlashIcon : EyeIcon" class="w-4 h-4" />
+                {{ isTokenRevealed ? '隐藏' : '显示' }}
+              </button>
+              <button @click="copyDebugValue(debugToken, '访问令牌')"
+                      class="px-3 py-2.5 rounded-xl bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 text-gray-600 dark:text-gray-300 text-[11px] font-black transition active:scale-95 flex items-center gap-1.5">
+                <ClipboardDocumentIcon class="w-4 h-4" />
+                {{ debugCopyState === '访问令牌' ? '已复制' : '复制' }}
+              </button>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 pt-1">
+              <div>
+                <div class="text-[10px] font-black text-gray-400 uppercase tracking-widest">开启时间</div>
+                <div class="text-[11px] font-bold text-gray-600 dark:text-gray-300 mt-0.5">{{ debugStatus.enabled_at || '-' }}</div>
+              </div>
+              <div>
+                <div class="text-[10px] font-black text-gray-400 uppercase tracking-widest">调试请求数</div>
+                <div class="text-[11px] font-bold text-gray-600 dark:text-gray-300 mt-0.5">{{ debugStatus.request_count || 0 }}</div>
+              </div>
+              <div>
+                <div class="text-[10px] font-black text-gray-400 uppercase tracking-widest">表达式执行</div>
+                <div class="text-[11px] font-bold mt-0.5"
+                     :class="debugStatus.allow_python ? 'text-emerald-500' : 'text-gray-400'">
+                  {{ debugStatus.allow_python ? '已允许' : '未允许' }}
+                </div>
+              </div>
+              <div>
+                <div class="text-[10px] font-black text-gray-400 uppercase tracking-widest">命令执行</div>
+                <div class="text-[11px] font-bold mt-0.5"
+                     :class="debugStatus.allow_shell ? 'text-emerald-500' : 'text-gray-400'">
+                  {{ debugStatus.allow_shell ? '已允许' : '未允许' }}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 页签 -->
+          <div class="flex gap-2 p-1.5 rounded-2xl bg-gray-100 dark:bg-black/20">
+            <button v-for="tab in [
+                      { id: 'console', name: '表达式控制台' },
+                      { id: 'api', name: 'API 接入说明' },
+                      { id: 'audit', name: '审计日志' }
+                    ]" :key="tab.id"
+                    @click="debugTab = tab.id"
+                    class="flex-1 py-2.5 rounded-xl text-xs font-black transition"
+                    :class="debugTab === tab.id
+                      ? 'bg-white dark:bg-gray-700 shadow-sm text-purple-500'
+                      : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'">
+              {{ tab.name }}
+            </button>
+          </div>
+
+          <!-- 表达式控制台 -->
+          <div v-if="debugTab === 'console'" class="space-y-3">
+            <div class="flex flex-wrap gap-2">
+              <button v-for="sample in debugSamples" :key="sample"
+                      @click="debugConsoleInput = sample"
+                      class="px-2.5 py-1.5 rounded-lg bg-gray-100 dark:bg-white/5 text-[10px] font-mono text-gray-500 hover:text-purple-500 transition">
+                {{ sample }}
+              </button>
+            </div>
+            <textarea v-model="debugConsoleInput" rows="3"
+                      placeholder="输入受限 Python 表达式（仅允许白名单模块，禁止私有属性访问）"
+                      class="w-full bg-gray-900 text-emerald-400 font-mono text-xs rounded-2xl p-4 outline-none focus:ring-2 focus:ring-purple-500"
+                      :disabled="!debugStatus.allow_python"></textarea>
+            <div class="flex items-center gap-3">
+              <button @click="runDebugConsole" :disabled="isDebugConsoleRunning || !debugStatus.allow_python"
+                      class="px-4 py-2.5 bg-purple-500 hover:bg-purple-600 text-white rounded-xl text-xs font-black transition active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2">
+                <PlayIcon class="w-4 h-4" :class="{ 'animate-pulse': isDebugConsoleRunning }" />
+                执行表达式
+              </button>
+              <span v-if="!debugStatus.allow_python" class="text-[10px] text-amber-500 font-bold">
+                未开启「表达式执行」能力，请关闭调试模式后重新开启并勾选该能力
+              </span>
+            </div>
+            <pre v-if="debugConsoleOutput"
+                 class="bg-gray-900 rounded-2xl p-4 text-[11px] font-mono text-gray-300 whitespace-pre-wrap break-all max-h-64 overflow-y-auto scrollbar-thin">{{ debugConsoleOutput }}</pre>
+          </div>
+
+          <!-- API 接入说明 -->
+          <div v-else-if="debugTab === 'api'" class="space-y-3">
+            <p class="text-xs leading-relaxed text-gray-500 dark:text-gray-400">
+              把下面的命令粘贴给你的 AI 编码助手（或直接在终端执行），即可让它读取运行状态、日志并执行受限调试动作。
+              接口默认监听 <code class="px-1 rounded bg-gray-100 dark:bg-white/10 font-mono">{{ debugStatus.endpoint || 'http://127.0.0.1:12180/api/debug' }}</code>。
+            </p>
+            <div class="relative">
+              <pre class="bg-gray-900 rounded-2xl p-4 text-[10px] leading-relaxed font-mono text-gray-300 whitespace-pre-wrap break-all max-h-72 overflow-y-auto scrollbar-thin">{{ curlExample }}</pre>
+              <button @click="copyDebugValue(curlExample, 'API 示例')"
+                      class="absolute top-3 right-3 px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white text-[10px] font-black transition flex items-center gap-1.5">
+                <ClipboardDocumentIcon class="w-3.5 h-3.5" />
+                {{ debugCopyState === 'API 示例' ? '已复制' : '复制' }}
+              </button>
+            </div>
+          </div>
+
+          <!-- 审计日志 -->
+          <div v-else class="space-y-3">
+            <div class="flex items-center gap-3">
+              <span class="text-xs font-black text-gray-700 dark:text-gray-200">调试操作审计（仅保存在本机）</span>
+              <div class="ml-auto flex gap-2">
+                <button @click="fetchDebugAudit" :disabled="isDebugAuditLoading"
+                        class="px-3 py-2 rounded-xl bg-white dark:bg-black/20 border border-gray-200 dark:border-white/10 text-[11px] font-black text-gray-600 dark:text-gray-300 transition active:scale-95 disabled:opacity-50 flex items-center gap-1.5">
+                  <ArrowPathIcon class="w-3.5 h-3.5" :class="{ 'animate-spin': isDebugAuditLoading }" />
+                  {{ isDebugAuditLoading ? '读取中...' : '刷新' }}
+                </button>
+                <button @click="clearDebugAuditLog"
+                        class="px-3 py-2 rounded-xl bg-white dark:bg-black/20 border border-red-200 dark:border-red-500/20 text-[11px] font-black text-red-500 transition active:scale-95">清空</button>
+              </div>
+            </div>
+
+            <!-- 读取失败时明确说明原因（例如令牌校验失败） -->
+            <div v-if="debugAuditError"
+                 class="p-3.5 rounded-2xl bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20">
+              <p class="text-[11px] font-black text-red-600 dark:text-red-400">审计日志读取失败</p>
+              <p class="text-[11px] font-mono text-red-500/80 dark:text-red-400/80 mt-1 break-all">{{ debugAuditError }}</p>
+              <p class="text-[10px] text-red-500/70 dark:text-red-400/70 mt-1">
+                提示：调试令牌在「轮换令牌」或「关闭调试模式」后会立即失效，需重新开启调试模式获取新令牌。
+              </p>
+            </div>
+
+            <div v-if="debugAudit.length === 0 && !debugAuditError"
+                 class="text-center text-xs text-gray-400 py-8">
+              {{ isDebugAuditLoading ? '正在读取审计日志...' : '暂无审计记录' }}
+            </div>
+            <div v-else-if="debugAudit.length > 0"
+                 class="bg-gray-900 rounded-2xl p-3 max-h-72 overflow-y-auto scrollbar-thin space-y-1">
+              <div v-for="(item, idx) in debugAudit" :key="idx"
+                   class="flex gap-3 px-2 py-1.5 rounded hover:bg-white/5 font-mono text-[10px]">
+                <span class="text-gray-500 shrink-0">{{ item.time }}</span>
+                <span class="shrink-0 font-black" :class="item.ok ? 'text-emerald-400' : 'text-red-400'">{{ item.action }}</span>
+                <span class="text-gray-300 break-all">{{ item.detail }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 撤回协议 -->
+          <div class="flex items-center gap-3 pt-2 border-t border-gray-100 dark:border-white/5">
+            <span class="text-[10px] text-gray-400">
+              协议确认版本 {{ debugStatus.consent?.version }} ·
+              {{ debugStatus.consent?.confirmed ? `已于 ${debugStatus.consent?.confirmed_at} 确认` : '尚未确认' }}
+            </span>
+            <button @click="handleRevokeDebugConsent"
+                    class="ml-auto text-[10px] font-black text-gray-400 hover:text-red-500 transition">撤回协议确认</button>
+          </div>
+        </div>
+
+        <!-- 调试协议弹窗 -->
+        <Teleport to="body">
+          <transition name="modal-fade">
+            <div v-if="showDebugAgreement" class="fixed inset-0 z-[99997] flex items-center justify-center p-6" style="-webkit-app-region: no-drag;">
+              <div class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
+              <div class="relative bg-white dark:bg-gray-900 w-full max-w-3xl rounded-3xl shadow-2xl overflow-hidden border border-purple-200 dark:border-purple-500/20 flex flex-col max-h-[88vh]">
+                <div class="px-7 py-5 border-b border-gray-100 dark:border-white/5 bg-purple-50/70 dark:bg-purple-500/5 shrink-0 flex items-center gap-4">
+                  <div class="p-3 rounded-2xl bg-purple-500 text-white shadow-lg">
+                    <ShieldCheckIcon class="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 class="text-lg font-black text-gray-800 dark:text-white">调试模式使用协议 / 风险说明书 / 责任划分书</h3>
+                    <p class="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
+                      请完整阅读，并逐项勾选确认后才能开启调试模式
+                    </p>
+                  </div>
+                  <button @click="showDebugAgreement = false"
+                          class="ml-auto p-1.5 rounded-xl text-gray-400 hover:text-gray-600 dark:hover:text-white transition">
+                    <XMarkSolidIcon class="w-5 h-5" />
+                  </button>
+                </div>
+
+                <div class="px-7 py-5 overflow-y-auto scrollbar-thin flex-1">
+                  <!-- 协议拉取失败：明确提示并提供重试 -->
+                  <div v-if="debugAgreementError"
+                       class="mb-4 p-4 rounded-2xl bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20">
+                    <p class="text-xs font-black text-red-600 dark:text-red-400">协议内容未能加载</p>
+                    <p class="text-[11px] font-mono text-red-500/80 dark:text-red-400/80 mt-1 break-all">{{ debugAgreementError }}</p>
+                    <button @click="loadDebugAgreement"
+                            class="mt-3 px-3.5 py-2 rounded-xl bg-red-500 hover:bg-red-600 text-white text-[11px] font-black transition active:scale-95 flex items-center gap-2">
+                      <ArrowPathIcon class="w-4 h-4" /> 重新拉取协议
+                    </button>
+                  </div>
+
+                  <pre v-if="debugAgreementText" class="text-[11px] leading-relaxed font-mono text-gray-600 dark:text-gray-300 whitespace-pre-wrap">{{ debugAgreementText }}</pre>
+                  <p v-else-if="!debugAgreementError" class="text-xs text-gray-400 text-center py-10">正在拉取协议内容...</p>
+
+                  <div class="mt-6 space-y-2.5">
+                    <div v-for="item in debugChecklist" :key="item.id"
+                         @click="toggleDebugCheck(item.id)"
+                         class="flex items-start gap-3 p-3.5 rounded-2xl cursor-pointer transition-all border"
+                         :class="debugChecked.includes(item.id)
+                           ? 'bg-purple-500/10 border-purple-500/40'
+                           : 'bg-gray-50 dark:bg-white/5 border-transparent hover:bg-gray-100 dark:hover:bg-white/10'">
+                      <div class="w-5 h-5 rounded-md border-2 flex items-center justify-center transition-all shrink-0 mt-0.5"
+                           :class="debugChecked.includes(item.id)
+                             ? 'bg-purple-500 border-purple-500'
+                             : 'border-gray-300 dark:border-gray-600'">
+                        <CheckIcon v-if="debugChecked.includes(item.id)" class="w-3.5 h-3.5 text-white" />
+                      </div>
+                      <span class="text-xs leading-relaxed text-gray-600 dark:text-gray-300">{{ item.text }}</span>
+                    </div>
+                  </div>
+
+                  <div class="mt-6 p-4 rounded-2xl bg-gray-50 dark:bg-white/5 border border-gray-100 dark:border-white/10 space-y-3">
+                    <div class="text-xs font-black text-gray-700 dark:text-gray-200">可选能力（默认关闭，按需开启）</div>
+                    <label class="flex items-center gap-3 cursor-pointer select-none">
+                      <input type="checkbox" v-model="debugAllowPython" class="accent-purple-500 w-4 h-4" />
+                      <span class="text-xs text-gray-600 dark:text-gray-300">
+                        允许<b>表达式执行</b>（受限 Python 表达式，仅白名单模块）
+                      </span>
+                    </label>
+                    <label class="flex items-center gap-3 cursor-pointer select-none">
+                      <input type="checkbox" v-model="debugAllowShell" class="accent-purple-500 w-4 h-4" />
+                      <span class="text-xs text-gray-600 dark:text-gray-300">
+                        允许<b>命令执行</b>（仅只读诊断命令白名单，最长 20 秒）
+                      </span>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="px-7 py-4 border-t border-gray-100 dark:border-white/5 bg-gray-50/70 dark:bg-black/30 shrink-0 flex items-center gap-3">
+                  <span class="text-[10px] font-black" :class="debugAllChecked ? 'text-emerald-500' : 'text-amber-500'">
+                    {{ debugAllChecked ? '已逐项确认，可以开启' : `还需确认 ${debugChecklist.length - debugChecked.length} 项` }}
+                  </span>
+                  <div class="ml-auto flex gap-2">
+                    <button @click="showDebugAgreement = false"
+                            class="px-4 py-2.5 rounded-2xl text-xs font-black text-gray-500 hover:bg-gray-200 dark:hover:bg-white/10 transition">
+                      取消
+                    </button>
+                    <button @click="handleEnableDebug" :disabled="!debugAllChecked || isDebugBusy"
+                            class="px-5 py-2.5 rounded-2xl text-xs font-black text-white transition active:scale-95 flex items-center gap-2"
+                            :class="debugAllChecked
+                              ? 'bg-purple-500 hover:bg-purple-600 shadow-lg shadow-purple-500/30'
+                              : 'bg-gray-300 dark:bg-gray-700 cursor-not-allowed'">
+                      <BugAntIcon class="w-4 h-4" :class="{ 'animate-pulse': isDebugBusy }" />
+                      我已理解全部风险，开启调试模式
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </transition>
+        </Teleport>
+
+        <!-- 删除物理日志确认 -->
+        <UniversalModal
+          :show="purgeLogState.show"
+          type="confirm"
+          title="删除全部日志文件"
+          :extra-data="{
+            message: '该操作会立即删除磁盘上的所有日志文件（含当前正在写入的文件），删除后无法恢复。确定继续吗？',
+            isDanger: true,
+            confirmText: isPurgingLogs ? '正在删除...' : '确认删除',
+            cancelText: '取消'
+          }"
+          @close="purgeLogState.show = false"
+          @confirm="(confirmed) => { if (confirmed) executePurgeLogFiles() }"
+        >
+          <template #confirm-icon>
+            <ExclamationTriangleIcon class="w-12 h-12 text-red-500 mx-auto mb-2" />
+          </template>
+        </UniversalModal>
+      </section>
+
 
       <!-- 14. 关于软件 -->
       <section id="section-about" class="bg-white/50 dark:bg-gray-900/40 backdrop-blur-md rounded-[2.5rem] p-8 border border-gray-100 dark:border-white/5 shadow-sm mb-12">
