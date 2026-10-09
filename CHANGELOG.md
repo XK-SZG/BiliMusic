@@ -2,6 +2,55 @@
 
 所有对本项目的显著更改都将记录在此文件中。
 
+## [1.0.23] - 2026-10-09
+
+### 🐛 缺陷修复 (Bug Fixes)
+
+#### 收藏夹 / 本地媒体库 / 队列 / 数据统计页面的卡片封面全部加载失败
+
+- **问题描述**：B 站收藏夹页面（媒体库卡片）、本地媒体库页面、队列页面与数据统计页面中，
+  卡片封面全部无法显示；后端日志出现形如
+  `从网络下载封面: https:///api/proxy/image?url=...` 的记录，并报
+  `Request URL is missing an 'http://' or 'https://' protocol`，接口最终返回 500。
+  B 站收藏夹页面的**视频卡片**封面（走另一条数据路径）却正常。
+- **根本原因**（v1.0.22 引入的回归，两个因素叠加）：
+  1. v1.0.22 为了让开发服务器不再依赖端口号判断，把 `API_BASE` 从绝对地址
+     `http://127.0.0.1:12180/api` 改为**同源相对路径** `/api`。
+     而 `stores/modules/player.js` 的 `formatImg()` 会把任何不以 `http` 开头的字符串
+     当作「协议相对 URL」并前置 `https:`，于是 `/api/proxy/image?url=...` 被拼成了
+     `https:///api/proxy/image?url=...`（三斜杠、主机名为空），后端 httpx 直接拒绝。
+  2. 更关键的是，`formatImg()` 产出的是**展示用地址**，但有两处调用点
+     （`updateVideoCollections`、`updateScoreBatch`）把它当作 `pic` 写入了数据库。
+     数据库由此存下「指向本服务自己」的代理地址，形成**永久性**坏数据 ——
+     这正是「封面怎么都修不好」的原因。
+- **修复方案**（前端 + 后端四层防御）：
+  - **前端 `formatImg()`**：
+    - 同源相对路径（`/...`，排除真正的协议相对地址 `//host/...`）原样返回，不再前置 `https:`；
+    - 代理地址改为**逐层剥离**（最多 5 层，防畸形数据死循环），兼容历史脏数据；
+    - 剥离后若得到同源相对路径也直接返回；
+    - 尺寸后缀处理改为「先去查询串、再切 `@`」，避免查询串含 `@` 时截错位置。
+  - **前端新增 `normalizePic()`**：专门产出「可持久化」的封面地址（绝不含 `/api/proxy/image`），
+    并修复上述两处写库调用点；畸形地址返回空串，避免再次写入脏数据。
+  - **后端新增 `backend/core/cover_utils.py`**：`sanitize_cover_url()` 统一净化逻辑
+    （剥代理、解编码、丢弃畸形三斜杠地址、幂等、限深）。
+  - **后端三层兜底**：
+    - `cover_cache_service.get_cover()` 下载前净化，无法还原则跳过；
+    - `/api/proxy/image` 入口净化，且 `HTTPException` 原样透传（此前 404 会被
+      `except Exception` 吞掉并包装成 500，掩盖了真实原因）；
+    - `local.py` 的「读」接口（`GET /api/local/videos`）与「写」接口
+      （`POST /api/local/collections/{id}/import`）双向净化，
+      使历史脏数据在读取时自愈、新数据不再被污染。
+
+#### 配套回归测试
+
+- 新增 [`tests/verify_cover_url.py`](tests/verify_cover_url.py)：后端净化逻辑 24 项断言；
+- 新增 [`tests/verify_cover_format.cjs`](tests/verify_cover_format.cjs)：
+  前端 `formatImg` / `normalizePic` 行为 18 项断言（含日志中真实坏地址的复刻）；
+- 新增 [`tests/verify_proxy_image.py`](tests/verify_proxy_image.py)：
+  `/api/proxy/image` 健壮性 10 项断言（畸形地址不再 500）。
+
+---
+
 ## [1.0.22] - 2026-10-08
 
 ### 🐛 缺陷修复 (Bug Fixes)

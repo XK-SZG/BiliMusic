@@ -219,36 +219,87 @@ export const usePlayerStore = defineStore('player', {
 
     formatImg(url, size = null) {
       if (!url) return ''
-      if (url.startsWith('/local_covers/') || url.startsWith('/local_stickers/')) {
-        return `${API_BASE.replace('/api', '')}${url}`
+      let raw = String(url)
+
+      // [修复] 同源相对路径（/local_covers/xxx、/api/proxy/image?url=...）必须原样保留。
+      // 旧实现会把任何不以 http 开头的字符串都当作「协议相对 URL」并前置 https:，
+      // 于是把 /api/proxy/image?url=... 变成了 https:///api/proxy/image?url=...（三斜杠、
+      // 无主机名），后端 cover_cache_service 收到后报「Request URL is missing an
+      // 'http://' or 'https://' protocol」并 404。注意排除 //host/... 这种真正的协议相对 URL。
+      if (raw.startsWith('/') && !raw.startsWith('//')) return raw
+
+      if (raw.startsWith('/local_covers/') || raw.startsWith('/local_stickers/')) {
+        return `${API_BASE.replace('/api', '')}${raw}`
       }
-      
-      // [修复锯齿] 强制替换图片大小后缀。本地数据库可能缓存了原始高分辨率URL或者不合适的尺寸
-      let cleanUrl = url.replace(/^https?:/, '').replace(/^http:/, '')
+
+      let cleanUrl = raw.replace(/^https?:/, '')
       let result = cleanUrl.startsWith('//') ? `https:${cleanUrl}` : `https://${cleanUrl}`
-      
-      // 检查是否为代理URL，提取真实目标
-      if (result.includes('/proxy/image?url=')) {
+
+      // 检查是否为代理URL，提取真实目标（可能被嵌套多层，逐层剥离）
+      let guard = 0
+      while (result.includes('/proxy/image?url=') && guard++ < 5) {
         try {
-          const urlParams = new URL(url).searchParams
-          result = decodeURIComponent(urlParams.get('url') || result)
-        } catch (e) {}
+          const parsed = new URL(result, window.location.origin)
+          const inner = parsed.searchParams.get('url')
+          if (!inner) break
+          result = decodeURIComponent(inner)
+        } catch (e) {
+          break
+        }
       }
+
+      // [修复] 剥离代理后可能得到同源相对路径（如老数据里存的是 /local_covers/xxx）
+      if (result.startsWith('/') && !result.startsWith('//')) return result
 
       // 处理 B 站相关的图片源，即使它在 archive.biliimg.com 等其它域下
       if (result.includes('hdslb.com') || result.includes('biliimg.com')) {
-        // 剥离所有的尺寸后缀，如 @xxx.webp
-        const baseUrl = result.split('@')[0]
-        
+        // 只取路径部分：先剥离查询串，再剥离尺寸后缀 @xxx.webp
+        // （旧实现用 split('@')[0] 会在查询串含 @ 时截错位置）
+        const queryIndex = result.indexOf('?')
+        const baseUrl = (queryIndex >= 0 ? result.slice(0, queryIndex) : result).split('@')[0]
+
         // 重新应用目标尺寸，如果没有传递 size 则默认使用中等压缩，防止过度加载高分辨率图片
         // 极重要的修改：对于从 SQLite 取出的纯原始 URL（如高清无后缀图），必须在此强制进行 down-scaling
         const targetSize = size || '640w_360h_1c_1s.webp'
         const processedUrl = `${baseUrl}@${targetSize}`
-        
+
         return `${API_BASE}/proxy/image?url=${encodeURIComponent(processedUrl)}`
       }
-      
+
       return result
+    },
+
+    /**
+     * [修复] 取出可持久化的封面地址（绝不带 /api/proxy/image 代理包装）。
+     *
+     * 背景：formatImg() 产出的是「浏览器可直接加载的展示地址」，在开发环境下是相对路径
+     * `/api/proxy/image?url=...`。若把它写进数据库（导入视频时），就会得到永久的自引用
+     * URL：再次展示时被当成协议相对地址拼成 https:///api/proxy/...，封面全部加载失败。
+     *
+     * 因此凡是「要写回后端」的 pic 都必须先经过本方法，只保留原始 B 站直链 / 本地相对路径。
+     */
+    normalizePic(url) {
+      if (!url) return ''
+      let raw = String(url)
+
+      // 逐层剥离可能已存在的代理包装（含历史脏数据）
+      let guard = 0
+      while (raw.includes('/proxy/image?url=') && guard++ < 5) {
+        try {
+          const parsed = new URL(raw, window.location.origin)
+          const inner = parsed.searchParams.get('url')
+          if (!inner) break
+          raw = decodeURIComponent(inner)
+        } catch (e) {
+          break
+        }
+      }
+
+      // 丢弃被历史脏数据破坏的地址（形如 https:///api/... 或残留的 /proxy/image?）
+      if (/^https?:\/{0,2}(\/|$)/.test(raw) && !/^https?:\/\/[\w.-]+/i.test(raw)) return ''
+      if (raw.startsWith('/proxy/image') || raw.startsWith('/api/proxy/image')) return ''
+
+      return raw
     },
 
     async checkLogin() {
@@ -418,7 +469,9 @@ export const usePlayerStore = defineStore('player', {
         const toAdd = targetColIds.filter(id => !currentIds.includes(id))
         const toRemove = currentIds.filter(id => !targetColIds.includes(id))
         for (const colId of toAdd) {
-          await localApi.importBiliVideos(colId, [{ bvid: v.bvid, title: v.title, owner: v.owner || v.upper?.name, pic: this.formatImg(v.pic || v.cover), duration: v.duration }])
+          // [修复] 必须写入可持久化的原始封面地址（normalizePic），
+          // 不能用展示用的 formatImg —— 否则数据库里会存下 /api/proxy/image?url=... 自引用地址
+          await localApi.importBiliVideos(colId, [{ bvid: v.bvid, title: v.title, owner: v.owner || v.upper?.name, pic: this.normalizePic(v.pic || v.cover), duration: v.duration }])
         }
         for (const colId of toRemove) await localApi.removeVideoFromCollection(colId, v.bvid)
       }
@@ -1192,7 +1245,8 @@ export const usePlayerStore = defineStore('player', {
             bvid: this.currentVideo.bvid,
             title: this.currentVideo.title,
             owner: this.currentVideo.owner,
-            pic: this.formatImg(this.currentVideo.pic),
+            // [修复] 写库用 normalizePic，避免把展示用的 /api/proxy/image 地址持久化
+            pic: this.normalizePic(this.currentVideo.pic),
             duration: this.currentVideo.duration
           }]);
           // 同步获取本地视频列表

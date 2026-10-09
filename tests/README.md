@@ -5,6 +5,9 @@
 ```
 tests/
 ├── verify_backend_v1021.py      # 后端自检脚本（日志 / 错误 / 调试 / 下载修复）
+├── verify_cover_url.py          # 封面地址净化逻辑验证（后端）
+├── verify_cover_format.cjs      # 封面地址格式化验证（前端 formatImg / normalizePic）
+├── verify_proxy_image.py        # /api/proxy/image 健壮性验证
 ├── check_api_wiring.cjs         # 前端 ↔ 后端 接线静态校验
 ├── check_api_wiring_selftest.cjs # 接线校验脚本自身的负向自检
 └── README.md                    # 本文件
@@ -13,6 +16,27 @@ tests/
 > 说明：本目录此前记载的 `simple_test.py`、`load_test.py`、`realistic_load_test.py`
 > 已被移除（见 `CHANGELOG.md` 1.0.20「清理测试脚本」），相关文档亦不存在。
 > 本文件已按当前仓库的真实内容重写。
+
+---
+
+## 〇之前、封面地址相关验证（v1.0.23 新增）
+
+```bash
+.venv\Scripts\python.exe tests\verify_cover_url.py      # 后端净化逻辑（24 项）
+node tests\verify_cover_format.cjs                      # 前端格式化（18 项）
+.venv\Scripts\python.exe tests\verify_proxy_image.py    # 代理接口健壮性（10 项）
+```
+
+**为什么需要它们**：v1.0.22 把 `API_BASE` 改为同源相对路径后，前端的 `formatImg()`
+把 `/api/proxy/image?url=...` 误拼成 `https:///api/proxy/image?url=...`（三斜杠、无主机名），
+且该「展示用地址」被两处调用点写进了数据库，导致收藏夹 / 本地媒体库 / 队列 / 统计四个页面的
+卡片封面全部永久失效。这三份脚本分别锁定：
+
+| 脚本 | 锁定的不变量 |
+|---|---|
+| `verify_cover_url.py` | 净化后绝不残留 `/proxy/image`、绝不出现三斜杠地址、幂等、限深不死循环 |
+| `verify_cover_format.cjs` | `formatImg` 不叠加代理层（幂等）、`normalizePic` 产出绝不含代理包装 |
+| `verify_proxy_image.py` | 畸形地址返回 404 而非 500、正常直链返回图片 |
 
 ---
 

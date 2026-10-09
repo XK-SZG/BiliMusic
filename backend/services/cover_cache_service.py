@@ -53,6 +53,18 @@ class CoverCacheService:
         Returns:
             图片二进制数据，失败返回 None
         """
+        # [修复] 先净化地址：历史脏数据里可能存着指向本服务的代理自引用地址
+        # （形如 /api/proxy/image?url=... 或已被拼坏的 https:///api/proxy/image?...），
+        # 不净化会请求自己并报 “Request URL is missing an 'http://' or 'https://' protocol”。
+        from ..core.cover_utils import sanitize_cover_url
+        cleaned = sanitize_cover_url(url)
+        if not cleaned or not cleaned.lower().startswith(('http://', 'https://')):
+            logger.warning(f"封面地址无法净化，跳过下载: {url}")
+            return None
+        if cleaned != url:
+            logger.debug(f"封面地址已净化: {url} -> {cleaned}")
+        url = cleaned
+
         cache_path = self._get_cache_path(url)
         
         # 1. 尝试从本地缓存读取

@@ -40,8 +40,12 @@ def get_local_videos(db_session: Session = Depends(db.get_db)):
         return []
     
     result = []
+    # [修复] 老版本曾把展示用的代理地址写进 videos.pic（形如 /api/proxy/image?url=...），
+    # 导致封面在多个页面全部加载失败。这里在返回前统一净化，
+    # 让「读」也能自愈：前端拿到的是可直接加载的原始直链或本地相对路径。
+    from ..core.cover_utils import sanitize_cover_url
     for v in videos:
-        pic_url = v.pic
+        pic_url = sanitize_cover_url(v.pic)
         if pic_url and not pic_url.startswith('http') and not pic_url.startswith('/'):
             pic_url = f"/local_covers/{pic_url}"
 
@@ -131,6 +135,7 @@ def reorder_videos(bvids: List[str], db_session: Session = Depends(db.get_db)):
 def import_bili_videos(col_id: str, videos: List[ImportVideoReq], db_session: Session = Depends(db.get_db)):
     """将B站视频导入到本地媒体夹"""
     try:
+        from ..core.cover_utils import sanitize_cover_url
         target_col = db_session.query(models.Collection).filter(models.Collection.id == col_id).first()
         if not target_col:
             raise HTTPException(status_code=404, detail="目标媒体夹不存在")
@@ -141,12 +146,17 @@ def import_bili_videos(col_id: str, videos: List[ImportVideoReq], db_session: Se
                     bvid=v_data.bvid,
                     title=v_data.title,
                     owner=v_data.owner,
-                    pic=v_data.pic,
+                    # [修复] 落库前净化：不接受 /api/proxy/image 这类自引用代理地址，
+                    # 否则该封面会永久失效（历史缺陷：收藏夹卡片与本地媒体卡片封面全部加载失败）
+                    pic=sanitize_cover_url(v_data.pic),
                     duration=v_data.duration,
                     download_status='not_downloaded',
                     score=5.0
                 )
                 db_session.add(video)
+            elif video.pic and '/proxy/image' in video.pic:
+                # 已有记录：顺带修复历史脏数据
+                video.pic = sanitize_cover_url(video.pic)
             if video not in target_col.videos:
                 target_col.videos.append(video)
         db_session.commit()

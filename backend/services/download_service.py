@@ -441,9 +441,18 @@ class Downloader:
                     del progress_cache[bvid]
 
     def _download_cover(self, bvid, pic_url):
-        if not pic_url or not pic_url.startswith("http"):
+        # [修复] 只对真正的远程 http(s) 直链下载封面。
+        # 历史脏数据里可能存着 `/api/proxy/image?url=...` 这类**自引用**地址
+        # （前端曾误把展示用的 formatImg 结果写回数据库），若照单全收会请求自己，
+        # 表现为封面全部 404 且日志出现 `https:///api/proxy/image?...`。
+        # 这里统一先做一次净化：剥掉代理包装，只保留原始直链。
+        from ..core.cover_utils import sanitize_cover_url
+        cleaned = sanitize_cover_url(pic_url)
+        if not cleaned or not cleaned.startswith("http"):
+            # 本地文件名或无法还原的地址：原样返回，不发起请求
             return pic_url
 
+        pic_url = cleaned
         try:
             ext = os.path.splitext(pic_url)[1].split('@')[0]
             if not ext or len(ext) > 5: ext = ".jpg"

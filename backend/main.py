@@ -241,13 +241,33 @@ import httpx
 async def proxy_image(url: str):
     if not url:
         raise HTTPException(status_code=400, detail="URL is required")
-    
+
+    # [修复] 先净化地址：
+    #   - 剥离可能存在的代理自引用包装（历史脏数据会把本接口地址又存回数据库）；
+    #   - 丢弃形如 https:///api/proxy/image?... 的畸形地址（三斜杠、无主机名），
+    #     否则 httpx 会抛 “Request URL is missing an 'http://' or 'https://' protocol”，
+    #     并被下面的 except 包装成 500。
+    from .core.cover_utils import sanitize_cover_url
+    original_url = url
+    cleaned_url = sanitize_cover_url(url)
+    if cleaned_url != original_url:
+        logger.warning(f"[封面代理] 检测到异常封面地址，已净化: {original_url} -> {cleaned_url or '(无法还原)'}")
+        url = cleaned_url
+    if not url:
+        raise HTTPException(
+            status_code=404,
+            detail="封面地址无效（无法从代理地址中还原出原始链接）")
+
     # 检查是否是本地图片
     if url.startswith('/local_covers/'):
         # 重定向到本地静态文件服务
         from fastapi.responses import RedirectResponse
         return RedirectResponse(url=url)
-        
+
+    if not url.lower().startswith(('http://', 'https://')):
+        logger.warning(f"[封面代理] 非远程直链，返回 404: {url}")
+        raise HTTPException(status_code=404, detail="封面地址不是可请求的远程直链")
+
     # 使用封面缓存服务
     from .services.cover_cache_service import get_cover_cache_service
     try:
@@ -274,6 +294,9 @@ async def proxy_image(url: str):
                 "Access-Control-Allow-Origin": "*"
             }
         )
+    except HTTPException:
+        # [修复] HTTPException 必须原样透传，否则 404 会被下面包装成 500
+        raise
     except Exception as e:
         logger.error(f"代理图片失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
